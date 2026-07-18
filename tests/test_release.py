@@ -1,0 +1,129 @@
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from safetensors import safe_open
+
+import gemma4_sae.release as release_module
+import gemma4_sae.train as train_module
+from gemma4_sae.config import DataConfig, ModelConfig, ProjectConfig, SAEConfig
+from gemma4_sae.release import (
+    build_release_bundle,
+    load_release_bundle,
+    publish_release,
+)
+from gemma4_sae.storage import ActivationShardWriter
+
+
+def _trained_tiny_config(tmp_path: Path, monkeypatch) -> ProjectConfig:
+    activation_dir = tmp_path / "activations"
+    run_dir = tmp_path / "run"
+    writer = ActivationShardWriter(
+        activation_dir,
+        d_model=4,
+        tokens_per_shard=32,
+        context_width=3,
+        metadata={"model_id": "synthetic"},
+    )
+    generator = torch.Generator().manual_seed(9)
+    writer.append(
+        torch.randn(64, 4, generator=generator),
+        torch.arange(64),
+        torch.zeros(64, 3, dtype=torch.long),
+    )
+    writer.close()
+    config = ProjectConfig(
+        model=ModelConfig(),
+        data=DataConfig(
+            activation_dir=str(activation_dir),
+            max_activation_tokens=64,
+            tokens_per_shard=32,
+            context_radius=1,
+        ),
+        sae=SAEConfig(
+            expansion_factor=2,
+            target_l0=2,
+            train_batch_size=8,
+            learning_rate=1e-3,
+            max_steps=2,
+            warmup_steps=1,
+            dead_after_steps=10,
+            resample_every_steps=10,
+            checkpoint_every_steps=2,
+            log_every_steps=1,
+            validation_fraction=0.25,
+            run_dir=str(run_dir),
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "select_device",
+        lambda _preference: torch.device("cpu"),
+    )
+    train_module.train(config)
+    return config
+
+
+def test_release_bundle_is_inference_only_and_hashed(tmp_path: Path, monkeypatch) -> None:
+    config = _trained_tiny_config(tmp_path, monkeypatch)
+    release_dir = build_release_bundle(config)
+
+    assert (release_dir / "sae_weights.safetensors").exists()
+    assert (release_dir / "README.md").exists()
+    assert not (release_dir / "feature_reports.json").exists()
+    with safe_open(release_dir / "sae_weights.safetensors", framework="pt") as handle:
+        keys = set(handle.keys())
+    assert "sae.encoder.weight" in keys
+    assert "normalization.activation_mean" in keys
+    assert not any("optimizer" in key for key in keys)
+    checksums = json.loads((release_dir / "checksums.json").read_text())
+    assert "sae_weights.safetensors" in checksums
+    sae, mean, scale, metadata = load_release_bundle(release_dir)
+    assert sae.n_features == 8
+    assert mean.shape == (4,)
+    assert scale.ndim == 0
+    assert metadata["model_id"] == config.model.model_id
+
+
+def test_publish_dry_run_never_calls_hugging_face(tmp_path: Path, monkeypatch) -> None:
+    config = _trained_tiny_config(tmp_path, monkeypatch)
+    result = publish_release(config, dry_run=True)
+    assert result["repo_id"].startswith("lamm-mit/")
+    assert result["dry_run"] is True
+    assert "evaluation.json" in result["missing_required_evidence"]
+    with pytest.raises(RuntimeError, match="required evidence"):
+        publish_release(config)
+
+
+def test_publish_uses_hugging_face_api_contract(tmp_path: Path, monkeypatch) -> None:
+    config = _trained_tiny_config(tmp_path, monkeypatch)
+    run_dir = Path(config.sae.run_dir)
+    (run_dir / "evaluation.json").write_text("{}", encoding="utf-8")
+    (run_dir / "fidelity.json").write_text("{}", encoding="utf-8")
+    calls = {}
+
+    class FakeApi:
+        def __init__(self, token):
+            calls["token"] = token
+
+        def create_repo(self, **kwargs):
+            calls["create_repo"] = kwargs
+            return "https://huggingface.co/lamm-mit/test-sae"
+
+        def upload_folder(self, **kwargs):
+            calls["upload_folder"] = kwargs
+            return SimpleNamespace(commit_url="https://huggingface.co/lamm-mit/test-sae/commit/1")
+
+    monkeypatch.setattr(release_module, "HfApi", FakeApi)
+    monkeypatch.setattr(release_module, "read_hf_token", lambda: "test-token")
+    result = publish_release(
+        config,
+        repo_id="lamm-mit/test-sae",
+        private=False,
+    )
+    assert result["repository_url"].endswith("lamm-mit/test-sae")
+    assert result["commit_url"].endswith("/commit/1")
+    assert calls["create_repo"]["private"] is False
+    assert calls["upload_folder"]["repo_id"] == "lamm-mit/test-sae"

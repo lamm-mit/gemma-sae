@@ -7,8 +7,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from .checkpoint import resolve_checkpoint
+from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
+from .devices import select_device
 from .sae import BatchTopKSAE
 from .storage import iter_activation_batches, load_manifest
 
@@ -34,12 +35,15 @@ def evaluate_cached_activations(
     sae: BatchTopKSAE,
     config: ProjectConfig,
     *,
+    activation_mean: torch.Tensor | None = None,
+    activation_scale: torch.Tensor | None = None,
     max_batches: int = 64,
-) -> dict[str, float]:
-    manifest = load_manifest(config.data.activation_dir)
+) -> dict[str, float | list[float]]:
     device = next(sae.parameters()).device
-    mean = torch.tensor(manifest["mean"], dtype=torch.float32)
-    scale = torch.tensor(manifest["global_rms"], dtype=torch.float32).clamp_min(1e-8)
+    if activation_mean is None or activation_scale is None:
+        raise ValueError("Training-only activation normalization is required.")
+    mean = activation_mean.float().cpu()
+    scale = activation_scale.float().cpu().clamp_min(1e-8)
     iterator = iter_activation_batches(
         config.data.activation_dir,
         batch_size=config.sae.train_batch_size,
@@ -54,7 +58,8 @@ def evaluate_cached_activations(
     cosine_sum = 0.0
     l0_sum = 0.0
     examples = 0
-    active_features = torch.zeros(sae.n_features, dtype=torch.bool, device=device)
+    feature_counts = torch.zeros(sae.n_features, dtype=torch.long, device=device)
+    l0_values = []
 
     for batch_index, batch in enumerate(iterator):
         if batch_index >= max_batches:
@@ -64,8 +69,11 @@ def evaluate_cached_activations(
         squared_error += (output.reconstruction - x).square().sum().item()
         target_energy += x.square().sum().item()
         cosine_sum += F.cosine_similarity(output.reconstruction, x, dim=-1).sum().item()
-        l0_sum += (output.features > 0).sum(dim=-1).float().sum().item()
-        active_features |= (output.features > 0).any(dim=0)
+        active = output.features > 0
+        l0_batch = active.sum(dim=-1).float()
+        l0_sum += l0_batch.sum().item()
+        l0_values.append(l0_batch.cpu())
+        feature_counts += active.sum(dim=0)
         examples += len(x)
 
     if examples == 0:
@@ -73,31 +81,47 @@ def evaluate_cached_activations(
             "No validation rows were available. Increase validation_fraction or collect more data."
         )
     dimensions = examples * sae.d_model
+    l0_tensor = torch.cat(l0_values)
+    feature_frequency = feature_counts.float().cpu() / examples
     return {
         "examples": float(examples),
         "normalized_mse": squared_error / dimensions,
         "fraction_variance_explained": 1.0 - squared_error / target_energy,
         "mean_cosine_similarity": cosine_sum / examples,
         "mean_l0": l0_sum / examples,
-        "active_feature_fraction": active_features.float().mean().item(),
+        "l0_quantiles_50_90_99": torch.quantile(
+            l0_tensor,
+            torch.tensor([0.5, 0.9, 0.99]),
+        ).tolist(),
+        "active_feature_fraction": (feature_counts > 0).float().mean().item(),
+        "feature_frequency_quantiles_50_90_99": torch.quantile(
+            feature_frequency,
+            torch.tensor([0.5, 0.9, 0.99]),
+        ).tolist(),
         "inference_threshold": sae.inference_threshold.item(),
     }
 
 
-def evaluate(config: ProjectConfig, checkpoint_request: str, max_batches: int) -> dict[str, float]:
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
+def evaluate(
+    config: ProjectConfig,
+    checkpoint_request: str,
+    max_batches: int,
+) -> dict[str, float | list[float]]:
+    device = select_device(config.model.backend)
     checkpoint_path = resolve_checkpoint(config.sae.run_dir, checkpoint_request)
     if checkpoint_path is None:
         raise ValueError("A checkpoint is required.")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    manifest = load_manifest(config.data.activation_dir)
+    validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
     sae = build_sae_from_checkpoint(checkpoint, device)
-    metrics = evaluate_cached_activations(sae, config, max_batches=max_batches)
+    metrics = evaluate_cached_activations(
+        sae,
+        config,
+        activation_mean=checkpoint["activation_mean"],
+        activation_scale=checkpoint["activation_scale"],
+        max_batches=max_batches,
+    )
 
     output_path = Path(config.sae.run_dir) / "evaluation.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)

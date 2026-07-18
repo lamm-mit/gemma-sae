@@ -10,18 +10,7 @@ from torch import Tensor, nn
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
 from .config import ModelConfig
-
-
-def _torch_dtype(name: str) -> torch.dtype:
-    choices = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    try:
-        return choices[name]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported dtype {name!r}; choose one of {sorted(choices)}.") from exc
+from .devices import resolve_model_dtype, select_device
 
 
 def read_hf_token() -> str | None:
@@ -38,16 +27,27 @@ def read_hf_token() -> str | None:
 
 def load_gemma(config: ModelConfig):
     token = read_hf_token()
-    processor = AutoProcessor.from_pretrained(config.model_id, token=token)
+    device = select_device(config.backend)
+    dtype = resolve_model_dtype(config.dtype, device)
+    processor = AutoProcessor.from_pretrained(
+        config.model_id,
+        revision=config.revision,
+        token=token,
+    )
     load_kwargs = {
         "token": token,
-        "dtype": _torch_dtype(config.dtype),
+        "revision": config.revision,
+        "dtype": dtype,
         "low_cpu_mem_usage": True,
         "attn_implementation": "sdpa",
     }
-    if config.device_map:
+    # Accelerate device maps are useful for CUDA sharding/offload. A direct move is
+    # more predictable for MPS and CPU.
+    if device.type == "cuda" and config.device_map:
         load_kwargs["device_map"] = config.device_map
     if config.load_in_4bit:
+        if device.type != "cuda":
+            raise RuntimeError("4-bit bitsandbytes loading is supported only on CUDA.")
         if importlib.util.find_spec("bitsandbytes") is None:
             raise ImportError(
                 "4-bit loading requires the optional dependency: "
@@ -58,10 +58,12 @@ def load_gemma(config: ModelConfig):
         load_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=_torch_dtype(config.dtype),
+            bnb_4bit_compute_dtype=dtype,
         )
 
     model = AutoModelForMultimodalLM.from_pretrained(config.model_id, **load_kwargs)
+    if device.type in {"mps", "cpu"}:
+        model = model.to(device)
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)

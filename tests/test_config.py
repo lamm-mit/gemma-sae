@@ -10,7 +10,19 @@ def test_checked_in_config_loads() -> None:
     config = load_config(path)
     assert config.model.model_id == "google/gemma-4-E4B"
     assert config.model.layer_index == 20
+    assert len(config.model.revision) == 40
+    assert len(config.data.revision) == 40
     assert config.sae.target_l0 == 64
+    assert config.publication.hf_repo_id.startswith("lamm-mit/")
+
+
+def test_instruction_tuned_config_uses_chat_messages() -> None:
+    path = Path(__file__).parents[1] / "configs" / "e4b_it_layer20_batchtopk.yaml"
+    config = load_config(path)
+    assert config.model.model_id == "google/gemma-4-E4B-it"
+    assert config.data.input_format == "messages"
+    assert config.data.text_column == "messages"
+    assert config.evaluation.split == "test_sft"
 
 
 def test_unknown_configuration_key_fails(tmp_path: Path) -> None:
@@ -22,9 +34,10 @@ model:
   mystery: true
 data: {}
 sae: {}
+evaluation: {}
+publication: {}
 """,
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="Unknown ModelConfig fields"):
         load_config(path)
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections.abc import Iterator
@@ -10,6 +11,8 @@ import numpy as np
 import torch
 from numpy.lib.format import open_memmap
 from torch import Tensor
+
+from .provenance import file_sha256
 
 MANIFEST_NAME = "manifest.json"
 
@@ -31,6 +34,7 @@ class ActivationShardWriter:
         tokens_per_shard: int,
         context_width: int,
         metadata: dict,
+        hash_shards: bool = True,
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -38,6 +42,7 @@ class ActivationShardWriter:
         self.tokens_per_shard = tokens_per_shard
         self.context_width = context_width
         self.metadata = metadata
+        self.hash_shards = hash_shards
         self.shards: list[dict] = []
         self.total_tokens = 0
         self.sum = np.zeros(d_model, dtype=np.float64)
@@ -108,7 +113,13 @@ class ActivationShardWriter:
         for array in (self._activations, self._tokens, self._contexts):
             array.flush()
         stem = f"shard-{self._shard_index:06d}"
-        self.shards.append({"stem": stem, "rows": self._position})
+        shard_record = {"stem": stem, "rows": self._position}
+        if self.hash_shards:
+            shard_record["sha256"] = {
+                kind: file_sha256(self.root / f"{stem}.{kind}.npy")
+                for kind in ("activations", "tokens", "contexts")
+            }
+        self.shards.append(shard_record)
         self._activations = None
         self._tokens = None
         self._contexts = None
@@ -131,6 +142,7 @@ class ActivationShardWriter:
             "total_tokens": self.total_tokens,
             "activation_dtype": "float16",
             "token_dtype": "int32",
+            "shards_hashed": self.hash_shards,
             "mean": mean.tolist(),
             "global_rms": global_rms,
             "shards": self.shards,
@@ -159,6 +171,76 @@ def load_manifest(root: str | Path) -> dict:
     return manifest
 
 
+def partition_shards(
+    shards: list[dict],
+    validation_fraction: float,
+    seed: int,
+) -> tuple[list[dict], list[dict]]:
+    """Deterministically reserve whole shards, preventing adjacent-token leakage."""
+
+    if not 0.0 <= validation_fraction < 0.5:
+        raise ValueError("validation_fraction must be in [0, 0.5).")
+    if validation_fraction == 0.0 or len(shards) < 2:
+        return list(shards), []
+    validation_count = max(1, round(len(shards) * validation_fraction))
+    validation_count = min(validation_count, len(shards) - 1)
+
+    ranked = sorted(
+        shards,
+        key=lambda shard: hashlib.sha256(
+            f"{seed}:{shard['stem']}".encode()
+        ).hexdigest(),
+    )
+    validation_stems = {shard["stem"] for shard in ranked[:validation_count]}
+    training = [shard for shard in shards if shard["stem"] not in validation_stems]
+    validation = [shard for shard in shards if shard["stem"] in validation_stems]
+    return training, validation
+
+
+def compute_training_statistics(
+    root: str | Path,
+    validation_fraction: float,
+    seed: int,
+    chunk_rows: int = 8192,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Compute normalization from training shards only."""
+
+    root = Path(root)
+    manifest = load_manifest(root)
+    training_shards, _ = partition_shards(
+        manifest["shards"],
+        validation_fraction,
+        seed,
+    )
+    d_model = int(manifest["d_model"])
+    total = 0
+    value_sum = np.zeros(d_model, dtype=np.float64)
+    square_sum = np.zeros(d_model, dtype=np.float64)
+    for shard in training_shards:
+        rows = int(shard["rows"])
+        activations = np.load(
+            root / f"{shard['stem']}.activations.npy",
+            mmap_mode="r",
+        )
+        for start in range(0, rows, chunk_rows):
+            values = np.asarray(activations[start : min(start + chunk_rows, rows)]).astype(
+                np.float64
+            )
+            value_sum += values.sum(axis=0)
+            square_sum += np.square(values).sum(axis=0)
+            total += len(values)
+    if total == 0:
+        raise RuntimeError("No training activation rows are available.")
+    mean = value_sum / total
+    variance = np.maximum(square_sum / total - np.square(mean), 0.0)
+    global_rms = max(float(np.sqrt(variance.mean())), 1e-8)
+    return (
+        torch.from_numpy(mean.astype(np.float32)),
+        torch.tensor(global_rms, dtype=torch.float32),
+        total,
+    )
+
+
 def iter_activation_batches(
     root: str | Path,
     batch_size: int,
@@ -170,28 +252,25 @@ def iter_activation_batches(
 ) -> Iterator[ActivationBatch]:
     """Stream shuffled rows from memory-mapped shards.
 
-    Validation uses the tail rows of every shard; training uses the remaining rows.
+    Validation reserves complete shards; training uses the remaining shards.
     """
 
     root = Path(root)
     manifest = load_manifest(root)
     epoch = 0
     while True:
-        shards = list(manifest["shards"])
+        training_shards, validation_shards = partition_shards(
+            manifest["shards"],
+            validation_fraction,
+            seed,
+        )
+        shards = validation_shards if validation else training_shards
         random.Random(seed + epoch).shuffle(shards)
         for shard in shards:
             stem = shard["stem"]
             rows = int(shard["rows"])
-            validation_rows = int(rows * validation_fraction)
-            if validation:
-                start, stop = rows - validation_rows, rows
-            else:
-                start, stop = 0, rows - validation_rows
-            if stop <= start:
-                continue
-
             rng = np.random.default_rng(seed + epoch * 1_000_003 + int(stem.split("-")[-1]))
-            order = rng.permutation(np.arange(start, stop))
+            order = rng.permutation(np.arange(rows))
             activations = np.load(root / f"{stem}.activations.npy", mmap_mode="r")
             tokens = np.load(root / f"{stem}.tokens.npy", mmap_mode="r")
             contexts = np.load(root / f"{stem}.contexts.npy", mmap_mode="r")

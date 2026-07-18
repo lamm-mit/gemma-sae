@@ -51,7 +51,11 @@ def test_tiny_training_run_produces_checkpoint_and_metrics(
             run_dir=str(run_dir),
         ),
     )
-    monkeypatch.setattr(train_module, "select_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(
+        train_module,
+        "select_device",
+        lambda _preference: torch.device("cpu"),
+    )
     checkpoint = train_module.train(config)
 
     assert checkpoint.exists()

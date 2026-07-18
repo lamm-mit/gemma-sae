@@ -11,19 +11,27 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .checkpoint import resolve_checkpoint, save_checkpoint
+from .checkpoint import (
+    resolve_checkpoint,
+    save_checkpoint,
+    validate_checkpoint_provenance,
+)
 from .config import ProjectConfig, load_config
+from .devices import select_device
 from .evaluate import evaluate_cached_activations
+from .provenance import (
+    canonical_sha256,
+    memory_metadata,
+    repository_commit,
+    runtime_metadata,
+    training_config_sha256,
+)
 from .sae import BatchTopKSAE
-from .storage import iter_activation_batches, load_manifest
-
-
-def select_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        return torch.device("mps")
-    return torch.device("cpu")
+from .storage import (
+    compute_training_statistics,
+    iter_activation_batches,
+    load_manifest,
+)
 
 
 def cosine_multiplier(step: int, warmup_steps: int, max_steps: int) -> float:
@@ -46,11 +54,22 @@ def checkpoint_payload(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     last_active_step: torch.Tensor,
+    manifest: dict,
+    device: torch.device,
+    activation_mean: torch.Tensor,
+    activation_scale: torch.Tensor,
 ) -> dict:
     payload = {
         "format_version": 1,
         "step": step,
         "config": config.to_dict(),
+        "config_sha256": canonical_sha256(config.to_dict()),
+        "training_config_sha256": training_config_sha256(config.to_dict()),
+        "activation_manifest_sha256": canonical_sha256(manifest),
+        "activation_mean": activation_mean.cpu(),
+        "activation_scale": activation_scale.cpu(),
+        "repository_commit": repository_commit(Path(__file__).parents[2]),
+        "runtime": runtime_metadata(device),
         "sae_state_dict": sae.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -72,8 +91,11 @@ def restore_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: torch.device,
+    config: ProjectConfig,
+    manifest: dict,
 ) -> tuple[int, torch.Tensor]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
     sae.load_state_dict(checkpoint["sae_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -87,10 +109,12 @@ def restore_checkpoint(
 
 
 def train(config: ProjectConfig, resume: str | None = None) -> Path:
-    device = select_device()
+    device = select_device(config.model.backend)
     torch.manual_seed(config.sae.seed)
     np.random.seed(config.sae.seed)
     random.seed(config.sae.seed)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     manifest = load_manifest(config.data.activation_dir)
     d_model = int(manifest["d_model"])
@@ -98,8 +122,11 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
     if config.sae.target_l0 > n_features:
         raise ValueError("target_l0 exceeds the SAE dictionary width.")
 
-    mean = torch.tensor(manifest["mean"], dtype=torch.float32)
-    scale = torch.tensor(manifest["global_rms"], dtype=torch.float32).clamp_min(1e-8)
+    mean, scale, normalization_rows = compute_training_statistics(
+        config.data.activation_dir,
+        config.sae.validation_fraction,
+        config.sae.seed,
+    )
     sae = BatchTopKSAE(
         d_model=d_model,
         n_features=n_features,
@@ -131,6 +158,8 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
             optimizer,
             scheduler,
             device,
+            config,
+            manifest,
         )
         print(f"Resumed {requested_checkpoint} at step {start_step}.")
 
@@ -147,6 +176,18 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
         json.dump(config.to_dict(), handle, indent=2)
+    run_metadata = {
+        "config_sha256": canonical_sha256(config.to_dict()),
+        "training_config_sha256": training_config_sha256(config.to_dict()),
+        "activation_manifest_sha256": canonical_sha256(manifest),
+        "activation_metadata": manifest.get("metadata", {}),
+        "normalization_rows": normalization_rows,
+        "activation_scale": scale.item(),
+        "repository_commit": repository_commit(Path(__file__).parents[2]),
+        "runtime": runtime_metadata(device),
+    }
+    with (run_dir / "run_metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(run_metadata, handle, indent=2)
 
     print(
         f"Training BatchTopK SAE on {device}: d_model={d_model}, features={n_features:,}, "
@@ -221,6 +262,10 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
                 optimizer,
                 scheduler,
                 last_active_step,
+                manifest,
+                device,
+                mean,
+                scale,
             )
             last_checkpoint = save_checkpoint(run_dir, step, payload)
             print(f"Saved {last_checkpoint}.")
@@ -228,9 +273,23 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
     if last_checkpoint is None:
         raise RuntimeError("Training completed without producing a checkpoint.")
 
-    validation_metrics = evaluate_cached_activations(sae.eval(), config)
+    validation_metrics = evaluate_cached_activations(
+        sae.eval(),
+        config,
+        activation_mean=mean,
+        activation_scale=scale,
+    )
     with (run_dir / "validation_metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(validation_metrics, handle, indent=2)
+    run_metadata.update(
+        {
+            "training_elapsed_seconds": time.perf_counter() - started,
+            "optimizer_examples_seen": config.sae.max_steps * config.sae.train_batch_size,
+            "memory_at_training_end": memory_metadata(device),
+        }
+    )
+    with (run_dir / "run_metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(run_metadata, handle, indent=2)
     print(json.dumps(validation_metrics, indent=2))
     return last_checkpoint
 

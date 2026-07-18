@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -12,8 +12,10 @@ T = TypeVar("T")
 @dataclass(frozen=True)
 class ModelConfig:
     model_id: str = "google/gemma-4-E4B"
+    revision: str | None = None
     layer_index: int = 20
-    dtype: str = "bfloat16"
+    backend: str = "auto"
+    dtype: str = "auto"
     device_map: str = "auto"
     load_in_4bit: bool = False
     sequence_length: int = 512
@@ -24,14 +26,17 @@ class ModelConfig:
 class DataConfig:
     dataset_id: str = "HuggingFaceFW/fineweb"
     dataset_config: str | None = "sample-10BT"
+    revision: str | None = None
     split: str = "train"
     text_column: str = "text"
+    input_format: str = "text"
     shuffle_buffer: int = 10_000
     min_chars: int = 200
     max_activation_tokens: int = 5_000_000
     tokens_per_shard: int = 65_536
     context_radius: int = 12
     activation_dir: str = "activations/gemma-4-e4b/layer-20"
+    hash_shards: bool = True
     seed: int = 17
 
 
@@ -60,10 +65,32 @@ class SAEConfig:
 
 
 @dataclass(frozen=True)
+class EvaluationConfig:
+    dataset_id: str = "Salesforce/wikitext"
+    dataset_config: str | None = "wikitext-103-raw-v1"
+    revision: str | None = None
+    split: str = "test"
+    text_column: str = "text"
+    input_format: str = "text"
+    min_chars: int = 100
+    max_sequences: int = 64
+    batch_size: int = 1
+
+
+@dataclass(frozen=True)
+class PublicationConfig:
+    hf_repo_id: str = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
+    private: bool = True
+    include_feature_reports: bool = False
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     model: ModelConfig
     data: DataConfig
     sae: SAEConfig
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    publication: PublicationConfig = field(default_factory=PublicationConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +103,12 @@ class ProjectConfig:
             raise ValueError("This repository currently targets Gemma 4 E4B checkpoints.")
         if self.model.layer_index < 0:
             raise ValueError("model.layer_index must be non-negative.")
+        if self.model.backend not in {"auto", "cuda", "mps", "cpu"}:
+            raise ValueError("model.backend must be auto, cuda, mps, or cpu.")
+        if self.model.dtype not in {"auto", "bfloat16", "float16", "float32"}:
+            raise ValueError("model.dtype must be auto, bfloat16, float16, or float32.")
+        if self.model.load_in_4bit and self.model.backend in {"mps", "cpu"}:
+            raise ValueError("4-bit bitsandbytes collection is supported only on CUDA.")
         if self.model.sequence_length < 8:
             raise ValueError("model.sequence_length must be at least 8.")
         if self.data.max_activation_tokens <= 0:
@@ -84,6 +117,8 @@ class ProjectConfig:
             raise ValueError("data.tokens_per_shard must be positive.")
         if self.data.context_radius < 0:
             raise ValueError("data.context_radius must be non-negative.")
+        if self.data.input_format not in {"text", "messages"}:
+            raise ValueError("data.input_format must be text or messages.")
         if self.sae.architecture != "batchtopk":
             raise ValueError("Only the batchtopk architecture is implemented.")
         if self.sae.expansion_factor < 1:
@@ -92,6 +127,18 @@ class ProjectConfig:
             raise ValueError("sae.target_l0 must be positive.")
         if not 0 <= self.sae.validation_fraction < 0.5:
             raise ValueError("sae.validation_fraction must be in [0, 0.5).")
+        if self.evaluation.input_format not in {"text", "messages"}:
+            raise ValueError("evaluation.input_format must be text or messages.")
+        if self.evaluation.max_sequences <= 0 or self.evaluation.batch_size <= 0:
+            raise ValueError("evaluation max_sequences and batch_size must be positive.")
+        if self.evaluation.batch_size != 1:
+            raise ValueError(
+                "evaluation.batch_size must be 1 so per-sequence fidelity and "
+                "confidence intervals are well defined."
+            )
+        repo_parts = self.publication.hf_repo_id.split("/")
+        if len(repo_parts) != 2 or not all(repo_parts):
+            raise ValueError("publication.hf_repo_id must have the form owner/repository.")
 
 
 def _strict_dataclass(cls: type[T], values: dict[str, Any]) -> T:
@@ -109,7 +156,7 @@ def load_config(path: str | Path) -> ProjectConfig:
     if not isinstance(raw, dict):
         raise ValueError("Configuration root must be a mapping.")
 
-    required = {"model", "data", "sae"}
+    required = {"model", "data", "sae", "evaluation", "publication"}
     missing = required - set(raw)
     unknown = set(raw) - required
     if missing or unknown:
@@ -121,6 +168,8 @@ def load_config(path: str | Path) -> ProjectConfig:
         model=_strict_dataclass(ModelConfig, raw["model"]),
         data=_strict_dataclass(DataConfig, raw["data"]),
         sae=_strict_dataclass(SAEConfig, raw["sae"]),
+        evaluation=_strict_dataclass(EvaluationConfig, raw["evaluation"]),
+        publication=_strict_dataclass(PublicationConfig, raw["publication"]),
     )
     config.validate()
     return config

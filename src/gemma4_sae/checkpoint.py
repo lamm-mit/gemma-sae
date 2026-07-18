@@ -5,6 +5,8 @@ from pathlib import Path
 
 import torch
 
+from .provenance import canonical_sha256, training_config_sha256
+
 
 def checkpoint_path(run_dir: str | Path, step: int) -> Path:
     return Path(run_dir) / "checkpoints" / f"step-{step:08d}.pt"
@@ -44,3 +46,22 @@ def resolve_checkpoint(run_dir: str | Path, requested: str | None) -> Path | Non
         raise FileNotFoundError(path)
     return path
 
+
+def validate_checkpoint_provenance(
+    checkpoint: dict,
+    config: dict,
+    activation_manifest: dict,
+) -> None:
+    expected_config = training_config_sha256(config)
+    expected_manifest = canonical_sha256(activation_manifest)
+    errors = []
+    observed_config = checkpoint.get(
+        "training_config_sha256",
+        checkpoint.get("config_sha256"),
+    )
+    if observed_config != expected_config:
+        errors.append("project configuration hash differs from the checkpoint")
+    if checkpoint.get("activation_manifest_sha256") != expected_manifest:
+        errors.append("activation manifest hash differs from the checkpoint")
+    if errors:
+        raise ValueError("Checkpoint provenance mismatch: " + "; ".join(errors))

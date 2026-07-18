@@ -8,10 +8,12 @@ from pathlib import Path
 import torch
 from transformers import AutoProcessor
 
-from .checkpoint import resolve_checkpoint
+from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
+from .devices import select_device
 from .evaluate import build_sae_from_checkpoint
 from .gemma import read_hf_token
+from .provenance import canonical_sha256
 from .storage import iter_activation_batches, load_manifest
 
 
@@ -33,7 +35,7 @@ def choose_candidate_features(
         config.data.activation_dir,
         batch_size=config.sae.train_batch_size,
         seed=config.sae.seed + 101,
-        validation=False,
+        validation=True,
         validation_fraction=config.sae.validation_fraction,
         repeat=False,
     )
@@ -67,21 +69,16 @@ def mine(
     top_contexts: int,
     max_batches: int,
 ) -> Path:
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    device = select_device(config.model.backend)
     checkpoint_path = resolve_checkpoint(config.sae.run_dir, checkpoint_request)
     if checkpoint_path is None:
         raise ValueError("A checkpoint is required.")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     sae = build_sae_from_checkpoint(checkpoint, device)
     manifest = load_manifest(config.data.activation_dir)
-    mean = torch.tensor(manifest["mean"], dtype=torch.float32)
-    scale = torch.tensor(manifest["global_rms"], dtype=torch.float32).clamp_min(1e-8)
+    validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
+    mean = checkpoint["activation_mean"].float()
+    scale = checkpoint["activation_scale"].float().clamp_min(1e-8)
 
     if feature_ids is None:
         feature_ids = choose_candidate_features(
@@ -104,7 +101,7 @@ def mine(
         config.data.activation_dir,
         batch_size=config.sae.train_batch_size,
         seed=config.sae.seed + 211,
-        validation=False,
+        validation=True,
         validation_fraction=config.sae.validation_fraction,
         repeat=False,
     )
@@ -131,11 +128,15 @@ def mine(
 
     processor = AutoProcessor.from_pretrained(
         config.model.model_id,
+        revision=config.model.revision,
         token=read_hf_token(),
     )
     tokenizer = processor.tokenizer
     report = {
         "checkpoint": str(checkpoint_path),
+        "config_sha256": canonical_sha256(config.to_dict()),
+        "activation_manifest_sha256": canonical_sha256(manifest),
+        "activation_split": "validation_shards",
         "examples_scanned": examples,
         "features": [],
     }

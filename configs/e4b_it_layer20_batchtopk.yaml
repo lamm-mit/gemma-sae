@@ -1,6 +1,6 @@
 model:
-  model_id: google/gemma-4-E4B
-  revision: 411aa17b749aa952df1359d2dcea73917a544d9a
+  model_id: google/gemma-4-E4B-it
+  revision: fa62d88df2e6df5efa9d26ad6b3beaea2765f0cd
   layer_index: 20
   backend: auto
   dtype: auto
@@ -10,18 +10,18 @@ model:
   inference_batch_size: 2
 
 data:
-  dataset_id: HuggingFaceFW/fineweb
-  dataset_config: sample-10BT
-  revision: 9bb295ddab0e05d785b879661af7260fed5140fc
-  split: train
-  text_column: text
-  input_format: text
+  dataset_id: HuggingFaceH4/ultrachat_200k
+  dataset_config: default
+  revision: 8049631c405ae6576f93f445c6b8166f76f5505a
+  split: train_sft
+  text_column: messages
+  input_format: messages
   shuffle_buffer: 10000
   min_chars: 200
   max_activation_tokens: 5000000
   tokens_per_shard: 65536
   context_radius: 12
-  activation_dir: activations/gemma-4-e4b/layer-20
+  activation_dir: activations/gemma-4-e4b-it/layer-20
   hash_shards: true
   seed: 17
 
@@ -44,21 +44,21 @@ sae:
   checkpoint_every_steps: 2500
   log_every_steps: 25
   validation_fraction: 0.02
-  run_dir: runs/e4b-layer20-batchtopk
+  run_dir: runs/e4b-it-layer20-batchtopk
   seed: 17
 
 evaluation:
-  dataset_id: Salesforce/wikitext
-  dataset_config: wikitext-103-raw-v1
-  revision: b08601e04326c79dfdd32d625aee71d232d685c3
-  split: test
-  text_column: text
-  input_format: text
-  min_chars: 100
+  dataset_id: HuggingFaceH4/ultrachat_200k
+  dataset_config: default
+  revision: 8049631c405ae6576f93f445c6b8166f76f5505a
+  split: test_sft
+  text_column: messages
+  input_format: messages
+  min_chars: 200
   max_sequences: 64
   batch_size: 1
 
 publication:
-  hf_repo_id: lamm-mit/gemma-4-e4b-layer20-batchtopk-sae
+  hf_repo_id: lamm-mit/gemma-4-e4b-it-layer20-batchtopk-sae
   private: true
   include_feature_reports: false

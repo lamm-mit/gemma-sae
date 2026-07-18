@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import itertools
-from collections.abc import Iterable, Iterator
+import time
 from pathlib import Path
 
 import torch
@@ -10,47 +9,24 @@ from datasets import load_dataset
 from tqdm.auto import tqdm
 
 from .config import ProjectConfig, load_config
+from .data import batched, iter_token_blocks
 from .gemma import (
     GemmaActivationExtractor,
     contexts_for_tokens,
     load_gemma,
     valid_token_mask,
 )
+from .provenance import (
+    canonical_sha256,
+    memory_metadata,
+    repository_commit,
+    runtime_metadata,
+)
 from .storage import MANIFEST_NAME, ActivationShardWriter
 
 
-def iter_token_blocks(
-    documents: Iterable[dict],
-    tokenizer,
-    *,
-    text_column: str,
-    sequence_length: int,
-    min_chars: int,
-) -> Iterator[torch.Tensor]:
-    buffer: list[int] = []
-    separator = tokenizer.eos_token_id
-    if separator is None:
-        raise ValueError("The tokenizer must define eos_token_id for document separation.")
-
-    for document in documents:
-        text = document.get(text_column)
-        if not isinstance(text, str) or len(text) < min_chars:
-            continue
-        token_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        buffer.extend(token_ids)
-        buffer.append(separator)
-        while len(buffer) >= sequence_length:
-            yield torch.tensor(buffer[:sequence_length], dtype=torch.long)
-            del buffer[:sequence_length]
-
-
-def batched(items: Iterable[torch.Tensor], batch_size: int) -> Iterator[torch.Tensor]:
-    iterator = iter(items)
-    while batch := list(itertools.islice(iterator, batch_size)):
-        yield torch.stack(batch)
-
-
 def collect(config: ProjectConfig) -> dict:
+    started = time.perf_counter()
     output_dir = Path(config.data.activation_dir)
     if (output_dir / MANIFEST_NAME).exists():
         raise FileExistsError(
@@ -69,6 +45,7 @@ def collect(config: ProjectConfig) -> dict:
         name=config.data.dataset_config,
         split=config.data.split,
         streaming=True,
+        revision=config.data.revision,
     )
     dataset = dataset.shuffle(
         seed=config.data.seed,
@@ -77,7 +54,8 @@ def collect(config: ProjectConfig) -> dict:
     blocks = iter_token_blocks(
         dataset,
         tokenizer,
-        text_column=config.data.text_column,
+        column=config.data.text_column,
+        input_format=config.data.input_format,
         sequence_length=config.model.sequence_length,
         min_chars=config.data.min_chars,
     )
@@ -86,14 +64,23 @@ def collect(config: ProjectConfig) -> dict:
     context_width = 2 * config.data.context_radius + 1
     metadata = {
         "model_id": config.model.model_id,
+        "model_revision": config.model.revision,
         "layer_index": config.model.layer_index,
-        "model_dtype": config.model.dtype,
+        "requested_backend": config.model.backend,
+        "resolved_backend": str(model.get_input_embeddings().weight.device),
+        "requested_model_dtype": config.model.dtype,
+        "resolved_model_dtype": str(next(model.parameters()).dtype).replace("torch.", ""),
         "model_quantized_4bit": config.model.load_in_4bit,
         "sequence_length": config.model.sequence_length,
         "dataset_id": config.data.dataset_id,
         "dataset_config": config.data.dataset_config,
+        "dataset_revision": config.data.revision,
         "dataset_split": config.data.split,
+        "input_format": config.data.input_format,
         "seed": config.data.seed,
+        "project_config_sha256": canonical_sha256(config.to_dict()),
+        "repository_commit": repository_commit(Path(__file__).parents[2]),
+        "runtime": runtime_metadata(model.get_input_embeddings().weight.device),
     }
     writer = ActivationShardWriter(
         output_dir,
@@ -101,6 +88,7 @@ def collect(config: ProjectConfig) -> dict:
         tokens_per_shard=config.data.tokens_per_shard,
         context_width=context_width,
         metadata=metadata,
+        hash_shards=config.data.hash_shards,
     )
 
     progress = tqdm(total=config.data.max_activation_tokens, unit="tok", desc="Activations")
@@ -139,6 +127,13 @@ def collect(config: ProjectConfig) -> dict:
         raise
 
     progress.close()
+    writer.metadata["collection_elapsed_seconds"] = time.perf_counter() - started
+    writer.metadata["activation_tokens_per_second"] = (
+        writer.total_tokens / max(writer.metadata["collection_elapsed_seconds"], 1e-9)
+    )
+    writer.metadata["memory_at_collection_end"] = memory_metadata(
+        model.get_input_embeddings().weight.device
+    )
     manifest = writer.close()
     print(
         f"Wrote {manifest['total_tokens']:,} activations in "

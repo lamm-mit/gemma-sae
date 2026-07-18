@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software or a released SAE, cite the repository and the exact SAE model card."
+title: "Gemma 4 Sparse Autoencoder Training"
+type: software
+authors:
+  - name: "Laboratory for Atomistic and Molecular Mechanics"
+version: 0.1.0
+license: Apache-2.0
