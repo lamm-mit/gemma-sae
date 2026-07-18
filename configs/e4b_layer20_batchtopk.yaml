@@ -1,0 +1,44 @@
+model:
+  model_id: google/gemma-4-E4B
+  layer_index: 20
+  dtype: bfloat16
+  device_map: auto
+  load_in_4bit: false
+  sequence_length: 512
+  inference_batch_size: 2
+
+data:
+  dataset_id: HuggingFaceFW/fineweb
+  dataset_config: sample-10BT
+  split: train
+  text_column: text
+  shuffle_buffer: 10000
+  min_chars: 200
+  max_activation_tokens: 5000000
+  tokens_per_shard: 65536
+  context_radius: 12
+  activation_dir: activations/gemma-4-e4b/layer-20
+  seed: 17
+
+sae:
+  architecture: batchtopk
+  expansion_factor: 8
+  target_l0: 64
+  train_batch_size: 512
+  learning_rate: 0.0003
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.0
+  max_steps: 50000
+  warmup_steps: 1000
+  gradient_clip_norm: 1.0
+  threshold_ema_decay: 0.999
+  dead_after_steps: 2500
+  resample_every_steps: 2500
+  max_resamples_per_event: 512
+  checkpoint_every_steps: 2500
+  log_every_steps: 25
+  validation_fraction: 0.02
+  run_dir: runs/e4b-layer20-batchtopk
+  seed: 17
+
