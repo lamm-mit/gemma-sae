@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from transformers import AutoModelForMultimodalLM, AutoProcessor
+from transformers import AutoModelForMultimodalLM, AutoTokenizer
 
 from .config import ModelConfig
 from .devices import resolve_model_dtype, select_device
@@ -29,7 +29,10 @@ def load_gemma(config: ModelConfig):
     token = read_hf_token()
     device = select_device(config.backend)
     dtype = resolve_model_dtype(config.dtype, device)
-    processor = AutoProcessor.from_pretrained(
+    # Activation collection and fidelity evaluation are text-only. Loading Gemma 4's
+    # multimodal AutoProcessor would import torchvision even though no image is ever
+    # supplied, so load the checkpoint tokenizer directly.
+    tokenizer = AutoTokenizer.from_pretrained(
         config.model_id,
         revision=config.revision,
         token=token,
@@ -67,7 +70,7 @@ def load_gemma(config: ModelConfig):
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
-    return processor, model
+    return tokenizer, model
 
 
 def find_text_decoder_layers(model: nn.Module) -> tuple[str, nn.ModuleList]:

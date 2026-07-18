@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import torch
-from transformers import AutoProcessor
+from transformers import AutoTokenizer
 
 from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
@@ -126,12 +126,11 @@ def mine(
                 elif item[0] > heap[0][0]:
                     heapq.heapreplace(heap, item)
 
-    processor = AutoProcessor.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         config.model.model_id,
         revision=config.model.revision,
         token=read_hf_token(),
     )
-    tokenizer = processor.tokenizer
     report = {
         "checkpoint": str(checkpoint_path),
         "config_sha256": canonical_sha256(config.to_dict()),

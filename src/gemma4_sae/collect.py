@@ -34,8 +34,7 @@ def collect(config: ProjectConfig) -> dict:
             "Choose a new activation_dir to avoid mixing runs."
         )
 
-    processor, model = load_gemma(config.model)
-    tokenizer = processor.tokenizer
+    tokenizer, model = load_gemma(config.model)
     pad_token_id = tokenizer.pad_token_id
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id

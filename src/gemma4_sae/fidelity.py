@@ -155,8 +155,7 @@ def fidelity(config: ProjectConfig, checkpoint_request: str) -> dict:
     validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
     sae = build_sae_from_checkpoint(checkpoint, device)
 
-    processor, model = load_gemma(config.model)
-    tokenizer = processor.tokenizer
+    tokenizer, model = load_gemma(config.model)
     dataset = load_dataset(
         config.evaluation.dataset_id,
         name=config.evaluation.dataset_config,
