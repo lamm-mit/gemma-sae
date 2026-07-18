@@ -6,3 +6,5 @@ authors:
   - name: "Laboratory for Atomistic and Molecular Mechanics"
 version: 0.1.0
 license: Apache-2.0
+repository-code: "https://github.com/lamm-mit/gemma-sae"
+url: "https://github.com/lamm-mit/gemma-sae"

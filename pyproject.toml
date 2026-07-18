@@ -9,6 +9,15 @@ description = "Reproducible sparse-autoencoder training for Gemma 4 residual-str
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
+keywords = ["gemma-4", "sparse-autoencoder", "interpretability", "batchtopk"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "accelerate>=1.11",
   "datasets>=4.0",
@@ -20,6 +29,11 @@ dependencies = [
   "tqdm>=4.66",
   "transformers>=5.13,<6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lamm-mit/gemma-sae"
+Repository = "https://github.com/lamm-mit/gemma-sae.git"
+Issues = "https://github.com/lamm-mit/gemma-sae/issues"
 
 [project.optional-dependencies]
 quantization = ["bitsandbytes>=0.49"]

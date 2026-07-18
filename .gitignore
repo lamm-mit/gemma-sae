@@ -17,4 +17,4 @@ feature_reports/
 *.safetensors
 *.npy
 wandb/
-
+logs/

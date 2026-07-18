@@ -17,6 +17,10 @@ Record:
 
 Do not select only favorable seeds or checkpoints after inspecting results.
 
+For the preregistered DGX Spark primary run, start from
+`configs/e4b_layer20_batchtopk_dgx_spark.yaml`, record any change as a new configuration,
+and retain the output of `gemma4-sae doctor` with the experiment artifacts.
+
 ## 2. Validate the pipeline with a smoke run
 
 Create a dedicated 100k-token smoke configuration. Training and other state-changing

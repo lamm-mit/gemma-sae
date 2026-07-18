@@ -1,5 +1,9 @@
 # Gemma 4 Sparse Autoencoder Training
 
+[![CI](https://github.com/lamm-mit/gemma-sae/actions/workflows/ci.yml/badge.svg)](https://github.com/lamm-mit/gemma-sae/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
+
 A reproducible, single-node pipeline for training sparse autoencoders on the residual
 stream of **Gemma 4 E4B**.
 
@@ -8,7 +12,7 @@ The [analysis notebook](notebooks/analyze_gemma4_sae.ipynb) is deliberately read
 it turns completed artifacts into publication figures without loading Gemma, starting
 training, or uploading anything. The project separates data collection, SAE
 optimization, evaluation, downstream intervention, feature mining, and release so every
-expensive stage is resumable and auditable.
+artifact is auditable and SAE optimization is exactly resumable from checkpoints.
 
 No pretrained SAE is bundled with this source repository. A defensible Gemma 4 SAE
 requires a real activation collection and training run; the release command packages and
@@ -61,6 +65,7 @@ Gemma; training then consumes cached shards without loading Gemma.
 
 - pinned Gemma 4 E4B base and instruction-tuned checkpoints
 - CUDA, Apple MPS, and CPU runtime selection with backend-appropriate model dtypes
+- a full-scale CUDA/BF16 configuration sized for NVIDIA DGX Spark
 - pinned FineWeb text and UltraChat message corpora; message lists use Gemma's chat template
 - robust discovery of the 42-layer text decoder stack
 - a forward hook that stores only the chosen layer rather than all hidden states
@@ -92,45 +97,98 @@ Python 3.11+ is required. CUDA is fastest; MPS and CPU are supported. CPU collec
 the full E4B checkpoint requires substantial system memory and is slow.
 
 ```bash
-git clone <this-repository>
-cd gemma-4-sae-training
+git clone https://github.com/lamm-mit/gemma-sae.git
+cd gemma-sae
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install --upgrade pip
+python -m pip install -e .
 ```
 
 For the optional 4-bit collection path:
 
 ```bash
-pip install -e ".[quantization]"
+python -m pip install -e ".[quantization]"
 ```
 
 For Jupyter:
 
 ```bash
-pip install -e ".[notebook]"
-jupyter lab notebooks/analyze_gemma4_sae.ipynb
+python -m pip install -e ".[notebook]"
+GEMMA4_SAE_CONFIG=configs/e4b_layer20_batchtopk.yaml \
+  jupyter lab notebooks/analyze_gemma4_sae.ipynb
 ```
 
 For development:
 
 ```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 pytest
 ruff check .
 ```
 
-Accept any access terms shown on the
-[`google/gemma-4-E4B`](https://huggingface.co/google/gemma-4-E4B) model page, then
-authenticate without putting a token in source control:
+### Native DGX Spark installation
+
+DGX Spark uses an ARM64 Grace CPU and GB10 Blackwell GPU. The primary path is native:
+reuse the CUDA-enabled PyTorch supplied by DGX OS instead of replacing it with a generic
+wheel. First verify that the host Python sees CUDA:
 
 ```bash
-export HF_TOKEN=hf_...
+python3 -c "import torch; print(torch.__version__, torch.version.cuda); \
+print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+If that prints `True` and an NVIDIA GB10 device:
+
+```bash
+git clone https://github.com/lamm-mit/gemma-sae.git
+cd gemma-sae
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --upgrade-strategy only-if-needed -e ".[dev,notebook]"
+python -m pip check
+pytest -q
+ruff check .
+```
+
+The `--system-site-packages` flag is intentional: it keeps the NVIDIA CUDA-enabled
+PyTorch build visible inside the virtual environment. Re-run the CUDA check after
+installation.
+
+Docker is optional. It is useful only when the host Python does not expose the NVIDIA
+PyTorch build, or when an immutable NVIDIA-tested CUDA/PyTorch environment is required
+for reproducibility. It is not required by this project. After exporting `HF_TOKEN` as
+shown below, the fallback is:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  --ipc=host \
+  --ulimit memlock=-1 \
+  -e HF_TOKEN \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -v "$PWD:/workspace/gemma-sae" \
+  -w /workspace/gemma-sae \
+  nvcr.io/nvidia/pytorch:25.12-py3 \
+  bash
+```
+
+Inside that container, run `python -m pip install -e ".[dev,notebook]"`.
+
+Accept any access terms shown on the
+[`google/gemma-4-E4B`](https://huggingface.co/google/gemma-4-E4B) model page. Read the
+token without placing it in shell history or source control:
+
+```bash
+read -rsp "Hugging Face token: " HF_TOKEN
+echo
+export HF_TOKEN
 ```
 
 ## Quick start
 
-The checked-in configurations are **pilot runs**, not smoke tests:
+The base and IT configurations are **pilot runs**, not smoke tests:
 
 ```bash
 CONFIG=configs/e4b_layer20_batchtopk.yaml  # or e4b_it_layer20_batchtopk.yaml
@@ -144,17 +202,101 @@ gemma4-sae mine --config "$CONFIG"
 gemma4-sae publish --config "$CONFIG" --checkpoint latest --dry-run
 ```
 
+### Full DGX Spark run
+
+The checked-in `e4b_layer20_batchtopk_dgx_spark.yaml` configuration is the primary
+single-layer research run:
+
+- CUDA and BF16 are mandatory, so it fails instead of silently falling back to CPU;
+- 50 million FineWeb activation tokens;
+- 262,144-row shards;
+- a 40,960-feature dictionary (16× expansion);
+- target L0 of 64;
+- 200,000 optimization steps and 20 checkpoints;
+- 256-sequence independent language-model fidelity evaluation.
+
+It stores about 261 GB of activation, token, and context arrays. Twenty FP32
+SAE-plus-Adam checkpoints add an estimated 50 GB. Reserve at least 450 GB free; 600 GB is
+more comfortable after the model cache, container or environment, logs, and release
+artifacts.
+
+To place large artifacts on a separate NVMe volume while keeping the checked-in relative
+paths:
+
+```bash
+export SAE_DATA=/mnt/nvme/gemma-sae
+mkdir -p "$SAE_DATA"/{activations,runs}
+ln -s "$SAE_DATA/activations" activations
+ln -s "$SAE_DATA/runs" runs
+```
+
+Create those links only in a fresh clone where `activations` and `runs` do not already
+exist. Both names are ignored by Git.
+
+Use a persistent terminal because activation collection is not resumable:
+
+```bash
+cd "$HOME/src/gemma-sae"  # or wherever the repository was cloned
+source .venv/bin/activate
+tmux new -s gemma-sae
+```
+
+Inside `tmux`:
+
+```bash
+export CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml
+mkdir -p logs
+set -o pipefail
+
+gemma4-sae doctor --config "$CONFIG" | tee logs/doctor.json
+```
+
+Before continuing, confirm `backend` is `cuda`, `model_dtype` is `bfloat16`, the
+accelerator is GB10, `warnings` is empty, and the reported filesystem has sufficient
+free space.
+
+Run the pipeline:
+
+```bash
+gemma4-sae collect --config "$CONFIG" 2>&1 | tee logs/collect.log
+gemma4-sae verify --config "$CONFIG" 2>&1 | tee logs/verify.log
+gemma4-sae train --config "$CONFIG" 2>&1 | tee logs/train.log
+gemma4-sae evaluate \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --max-batches 1000000 \
+  2>&1 | tee logs/evaluate.log
+gemma4-sae fidelity \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  2>&1 | tee logs/fidelity.log
+gemma4-sae mine \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --n-features 64 \
+  --top-contexts 40 \
+  --max-batches 4096 \
+  2>&1 | tee logs/mine.log
+gemma4-sae publish \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --dry-run
+```
+
+Detach from `tmux` with `Ctrl-B`, then `D`; reconnect with
+`tmux attach -t gemma-sae`.
+
 Resume an interrupted training run:
 
 ```bash
-gemma4-sae train --config configs/e4b_layer20_batchtopk.yaml --resume
+gemma4-sae train --config "$CONFIG" --resume 2>&1 | tee -a logs/train.log
 ```
 
 Mine particular feature IDs:
 
 ```bash
 gemma4-sae mine \
-  --config configs/e4b_layer20_batchtopk.yaml \
+  --config "$CONFIG" \
   --features 41 928 12007 \
   --top-contexts 40
 ```
@@ -165,9 +307,9 @@ configurations target separate repositories in the verified lowercase `lamm-mit`
 namespace:
 
 ```bash
-export HF_TOKEN=hf_...  # must have write permission to lamm-mit
+# HF_TOKEN must have write permission to the lamm-mit organization.
 gemma4-sae publish \
-  --config configs/e4b_layer20_batchtopk.yaml \
+  --config "$CONFIG" \
   --checkpoint latest \
   --public
 ```
@@ -178,7 +320,7 @@ evaluation, and live-model fidelity are present. Optimizer state and mined text 
 are excluded; contexts can be included only by changing the explicit publication setting
 after privacy and license review.
 
-## Default experiment
+## Pilot experiment
 
 | Setting | Value |
 |---|---:|
@@ -197,13 +339,32 @@ after privacy and license review.
 Each BF16/FP16 activation vector requires `2 × 2,560 = 5,120` bytes. Plan disk
 capacity before increasing `max_activation_tokens`.
 
+## DGX Spark primary experiment
+
+| Setting | Value |
+|---|---:|
+| Configuration | `configs/e4b_layer20_batchtopk_dgx_spark.yaml` |
+| Backend / model dtype | CUDA / BF16 |
+| Gemma collection batch | 4 sequences × 512 tokens |
+| Activation tokens | 50,000,000 |
+| Complete activation store estimate | 261.2 GB |
+| Dictionary width | 40,960 (16× expansion) |
+| Target mean L0 | 64 |
+| Training batch | 512 activation vectors |
+| Training steps | 200,000 |
+| Optimizer activation examples | 102.4 million |
+| Checkpoint cadence | 10,000 steps (20 estimated checkpoints) |
+| Estimated checkpoint storage | 50.3 GB |
+| Independent fidelity sequences | 256 |
+
 ### Suggested run sizes
 
 | Run | Activation tokens | Expansion | Steps | Purpose |
 |---|---:|---:|---:|---|
 | Smoke | 100k | 2× | 1k | verify the system |
-| Pilot (default) | 5M | 8× | 50k | tune L0, width, and learning rate |
-| Serious single layer | 50–100M | 16× | 200k+ | feature research |
+| Pilot | 5M | 8× | 50k | tune L0, width, and learning rate |
+| DGX Spark primary | 50M | 16× | 200k | serious single-layer feature research |
+| Large single layer | 100M | 16×+ | 200k+ | wider frontier and stability study |
 | Scope-style suite | 100M+ per site | multiple widths | sweep | many layers and hook sites |
 
 The final row is a substantial compute and storage project. "Proper" does not mean that
@@ -355,6 +516,9 @@ SAEs provide a useful decomposition, not a guaranteed catalogue of the model's u
 
 ## References
 
+- [Source repository](https://github.com/lamm-mit/gemma-sae)
+- [NVIDIA DGX Spark user guide](https://docs.nvidia.com/dgx/dgx-spark/)
+- [NVIDIA container runtime for DGX Spark](https://docs.nvidia.com/dgx/dgx-spark/nvidia-container-runtime-for-docker.html)
 - [Gemma 4 model card](https://ai.google.dev/gemma/docs/core/model_card_4)
 - [Gemma 4 E4B weights](https://huggingface.co/google/gemma-4-E4B)
 - [Gemma Scope](https://ai.google.dev/gemma/docs/gemma_scope)

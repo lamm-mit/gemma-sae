@@ -25,6 +25,22 @@ def test_instruction_tuned_config_uses_chat_messages() -> None:
     assert config.evaluation.split == "test_sft"
 
 
+def test_dgx_spark_config_is_full_scale_cuda_run() -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "configs"
+        / "e4b_layer20_batchtopk_dgx_spark.yaml"
+    )
+    config = load_config(path)
+    assert config.model.backend == "cuda"
+    assert config.model.dtype == "bfloat16"
+    assert config.model.load_in_4bit is False
+    assert config.data.max_activation_tokens == 50_000_000
+    assert config.sae.expansion_factor == 16
+    assert config.sae.max_steps == 200_000
+    assert config.evaluation.max_sequences == 256
+
+
 def test_unknown_configuration_key_fails(tmp_path: Path) -> None:
     path = tmp_path / "bad.yaml"
     path.write_text(

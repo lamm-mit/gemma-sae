@@ -1,0 +1,64 @@
+model:
+  model_id: google/gemma-4-E4B
+  revision: 411aa17b749aa952df1359d2dcea73917a544d9a
+  layer_index: 20
+  backend: cuda
+  dtype: bfloat16
+  device_map: auto
+  load_in_4bit: false
+  sequence_length: 512
+  inference_batch_size: 4
+
+data:
+  dataset_id: HuggingFaceFW/fineweb
+  dataset_config: sample-10BT
+  revision: 9bb295ddab0e05d785b879661af7260fed5140fc
+  split: train
+  text_column: text
+  input_format: text
+  shuffle_buffer: 100000
+  min_chars: 200
+  max_activation_tokens: 50000000
+  tokens_per_shard: 262144
+  context_radius: 12
+  activation_dir: activations/gemma-4-e4b-fineweb-50m/layer-20
+  hash_shards: true
+  seed: 17
+
+sae:
+  architecture: batchtopk
+  expansion_factor: 16
+  target_l0: 64
+  train_batch_size: 512
+  learning_rate: 0.0003
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.0
+  max_steps: 200000
+  warmup_steps: 4000
+  gradient_clip_norm: 1.0
+  threshold_ema_decay: 0.999
+  dead_after_steps: 10000
+  resample_every_steps: 10000
+  max_resamples_per_event: 1024
+  checkpoint_every_steps: 10000
+  log_every_steps: 100
+  validation_fraction: 0.02
+  run_dir: runs/e4b-layer20-batchtopk-dgx-50m-16x-l064-seed17
+  seed: 17
+
+evaluation:
+  dataset_id: Salesforce/wikitext
+  dataset_config: wikitext-103-raw-v1
+  revision: b08601e04326c79dfdd32d625aee71d232d685c3
+  split: test
+  text_column: text
+  input_format: text
+  min_chars: 100
+  max_sequences: 256
+  batch_size: 1
+
+publication:
+  hf_repo_id: lamm-mit/gemma-4-e4b-layer20-batchtopk-sae
+  private: true
+  include_feature_reports: false
