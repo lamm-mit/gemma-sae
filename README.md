@@ -116,9 +116,11 @@ For Jupyter:
 
 ```bash
 python -m pip install -e ".[notebook]"
-GEMMA4_SAE_CONFIG=configs/e4b_layer20_batchtopk.yaml \
+GEMMA4_SAE_CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml \
   jupyter lab notebooks/analyze_gemma4_sae.ipynb
 ```
+
+Use `configs/e4b_layer20_batchtopk.yaml` instead when analyzing the smaller pilot run.
 
 For development:
 
