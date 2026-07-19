@@ -80,7 +80,8 @@ Gemma; training then consumes cached shards without loading Gemma.
   - unit-norm decoder columns;
   - removal of decoder gradients parallel to feature directions;
   - an exponential-moving-average inference threshold;
-  - dead-feature tracking and residual-based resampling;
+  - the paper's top-k auxiliary residual loss for dead latents;
+  - dead-feature tracking and optional residual-based resampling;
   - warmup plus cosine learning-rate decay;
   - gradient clipping, atomic checkpoints, and exact optimizer/RNG resume
 - held-out MSE, fraction of variance explained, cosine similarity, L0, and live-feature
@@ -212,26 +213,33 @@ single-layer research run:
 - 262,144-row shards;
 - a 40,960-feature dictionary (16× expansion);
 - target L0 of 64;
-- 200,000 optimization steps and 20 checkpoints;
+- 4,096-vector training batches, matching the BatchTopK reference experiments;
+- the paper's 512-latent auxiliary loss with coefficient 1/32;
+- 25,000 optimization steps, 102.4 million optimizer examples, and 10 checkpoints;
 - 256-sequence independent language-model fidelity evaluation.
 
-It stores about 261 GB of activation, token, and context arrays. Twenty FP32
-SAE-plus-Adam checkpoints add an estimated 50 GB. Reserve at least 450 GB free; 600 GB is
+Version 0.2 changed the training objective after a high dead-feature fraction exposed
+that the original trainer lacked the BatchTopK auxiliary loss. Pre-0.2 checkpoints are
+preserved negative-result artifacts and are intentionally incompatible with the corrected
+primary run. Existing verified activation shards remain valid and should be reused.
+
+It stores about 261 GB of activation, token, and context arrays. Ten FP32
+SAE-plus-Adam checkpoints add an estimated 25 GB. Reserve at least 450 GB free; 600 GB is
 more comfortable after the model cache, container or environment, logs, and release
 artifacts.
 
-To place large artifacts on a separate NVMe volume while keeping the checked-in relative
-paths:
+The safest default is a writable directory in the current user's home:
 
 ```bash
-export SAE_DATA=/mnt/nvme/gemma-sae
+export SAE_DATA="$HOME/gemma-sae-data"
 mkdir -p "$SAE_DATA"/{activations,runs}
 ln -s "$SAE_DATA/activations" activations
 ln -s "$SAE_DATA/runs" runs
 ```
 
 Create those links only in a fresh clone where `activations` and `runs` do not already
-exist. Both names are ignored by Git.
+exist. Both names are ignored by Git. Use another volume only after confirming its real
+mount point and write permission with `df -h <path>` and `test -w <path>`.
 
 Use a persistent terminal because activation collection is not resumable:
 
@@ -318,7 +326,9 @@ Omitting `--public` respects the safer `publication.private: true` staging defau
 Publishing refuses to proceed unless run metadata, validation metrics, held-out
 evaluation, and live-model fidelity are present. Optimizer state and mined text contexts
 are excluded; contexts can be included only by changing the explicit publication setting
-after privacy and license review.
+after privacy and license review. The checked-in configurations also refuse publication
+when fewer than 90% of dictionary features activate on the held-out evaluation scan;
+change that explicit threshold only with a documented scientific rationale.
 
 ## Pilot experiment
 
@@ -350,11 +360,12 @@ capacity before increasing `max_activation_tokens`.
 | Complete activation store estimate | 261.2 GB |
 | Dictionary width | 40,960 (16× expansion) |
 | Target mean L0 | 64 |
-| Training batch | 512 activation vectors |
-| Training steps | 200,000 |
+| Training batch | 4,096 activation vectors |
+| Auxiliary dead-latent objective | top-k 512, coefficient 1/32 |
+| Training steps | 25,000 |
 | Optimizer activation examples | 102.4 million |
-| Checkpoint cadence | 10,000 steps (20 estimated checkpoints) |
-| Estimated checkpoint storage | 50.3 GB |
+| Checkpoint cadence | 2,500 steps (10 estimated checkpoints) |
+| Estimated checkpoint storage | 25.2 GB |
 | Independent fidelity sequences | 256 |
 
 ### Suggested run sizes
@@ -363,8 +374,8 @@ capacity before increasing `max_activation_tokens`.
 |---|---:|---:|---:|---|
 | Smoke | 100k | 2× | 1k | verify the system |
 | Pilot | 5M | 8× | 50k | tune L0, width, and learning rate |
-| DGX Spark primary | 50M | 16× | 200k | serious single-layer feature research |
-| Large single layer | 100M | 16×+ | 200k+ | wider frontier and stability study |
+| DGX Spark primary | 50M | 16× | 25k at batch 4,096 | serious single-layer feature research |
+| Large single layer | 100M | 16×+ | budget 100M+ optimizer examples | wider frontier and stability study |
 | Scope-style suite | 100M+ per site | multiple widths | sweep | many layers and hook sites |
 
 The final row is a substantial compute and storage project. "Proper" does not mean that
@@ -424,7 +435,13 @@ appending a different model, layer, precision, or dataset would invalidate the S
 - `validation_fraction`: fraction of complete shards reserved before normalization or
   training, preventing adjacent-token leakage.
 - `dead_after_steps`: inactivity window before a feature is considered dead.
-- `resample_every_steps`: cadence for reinitializing dead directions from large residuals.
+- `auxiliary_top_k`: number of dead latents per sample used to reconstruct the main
+  residual.
+- `auxiliary_loss_coefficient`: weight on that auxiliary objective; the BatchTopK
+  reference value is 1/32.
+- `resample_dead_features`: optional experimental residual-based reinitialization. It is
+  disabled in the primary paper-aligned configuration because the auxiliary objective is
+  the primary anti-collapse mechanism.
 
 Run an L0 sweep rather than assuming 64 is correct, for example 32, 64, 128, and 256.
 Compare fraction of variance explained, downstream fidelity, feature coherence, and sparse

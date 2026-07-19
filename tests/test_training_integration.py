@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import torch
@@ -37,13 +38,13 @@ def test_tiny_training_run_produces_checkpoint_and_metrics(
             context_radius=1,
         ),
         sae=SAEConfig(
-            expansion_factor=2,
-            target_l0=2,
+            expansion_factor=4,
+            target_l0=1,
             train_batch_size=8,
             learning_rate=1e-3,
             max_steps=3,
             warmup_steps=1,
-            dead_after_steps=10,
+            dead_after_steps=1,
             resample_every_steps=10,
             checkpoint_every_steps=3,
             log_every_steps=1,
@@ -61,3 +62,10 @@ def test_tiny_training_run_produces_checkpoint_and_metrics(
     assert checkpoint.exists()
     assert (run_dir / "train_metrics.jsonl").exists()
     assert (run_dir / "validation_metrics.json").exists()
+    first_metric = json.loads(
+        (run_dir / "train_metrics.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert "reconstruction_mse" in first_metric
+    assert "auxiliary_mse" in first_metric
+    assert "auxiliary_loss" in first_metric
+    assert first_metric["auxiliary_loss"] > 0

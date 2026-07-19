@@ -37,7 +37,12 @@ def test_dgx_spark_config_is_full_scale_cuda_run() -> None:
     assert config.model.load_in_4bit is False
     assert config.data.max_activation_tokens == 50_000_000
     assert config.sae.expansion_factor == 16
-    assert config.sae.max_steps == 200_000
+    assert config.sae.train_batch_size == 4_096
+    assert config.sae.max_steps == 25_000
+    assert config.sae.auxiliary_loss_coefficient == 1 / 32
+    assert config.sae.auxiliary_top_k == 512
+    assert config.sae.dead_after_steps == 5
+    assert config.sae.resample_dead_features is False
     assert config.evaluation.max_sequences == 256
 
 

@@ -32,19 +32,22 @@ sae:
   train_batch_size: 512
   learning_rate: 0.0003
   beta1: 0.9
-  beta2: 0.999
+  beta2: 0.99
   weight_decay: 0.0
   max_steps: 50000
   warmup_steps: 1000
   gradient_clip_norm: 1.0
   threshold_ema_decay: 0.999
-  dead_after_steps: 2500
+  auxiliary_loss_coefficient: 0.03125
+  auxiliary_top_k: 512
+  dead_after_steps: 5
+  resample_dead_features: false
   resample_every_steps: 2500
-  max_resamples_per_event: 512
+  max_resamples_per_event: 0
   checkpoint_every_steps: 2500
   log_every_steps: 25
   validation_fraction: 0.02
-  run_dir: runs/e4b-it-layer20-batchtopk
+  run_dir: runs/e4b-it-layer20-batchtopk-auxk512
   seed: 17
 
 evaluation:
@@ -62,3 +65,4 @@ publication:
   hf_repo_id: lamm-mit/gemma-4-e4b-it-layer20-batchtopk-sae
   private: true
   include_feature_reports: false
+  min_active_feature_fraction: 0.9

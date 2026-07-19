@@ -15,6 +15,11 @@ def test_batch_topk_enforces_average_l0() -> None:
     assert output.reconstruction.shape == x.shape
 
 
+def test_encoder_bias_is_initialized_without_feature_preference() -> None:
+    sae = BatchTopKSAE(d_model=6, n_features=12, target_l0=3)
+    torch.testing.assert_close(sae.encoder.bias, torch.zeros_like(sae.encoder.bias))
+
+
 def test_thresholded_inference_uses_recorded_threshold() -> None:
     sae = BatchTopKSAE(d_model=4, n_features=8, target_l0=2, threshold_ema_decay=0.5)
     sae.update_inference_threshold_(torch.tensor(1.25))
@@ -48,3 +53,25 @@ def test_dead_feature_resampling_changes_requested_columns() -> None:
     norms = sae.decoder.weight[:, [1, 5]].norm(dim=0)
     torch.testing.assert_close(norms, torch.ones_like(norms))
 
+
+def test_auxiliary_loss_trains_dead_features_on_main_residual() -> None:
+    torch.manual_seed(2)
+    sae = BatchTopKSAE(d_model=4, n_features=8, target_l0=2)
+    x = torch.randn(6, 4)
+    output = sae.train()(x, use_threshold=False)
+    dead = torch.tensor([False, False, False, False, True, True, True, True])
+
+    loss = sae.auxiliary_dead_feature_loss(
+        x,
+        output.reconstruction,
+        output.preactivations,
+        dead,
+        top_k=2,
+    )
+    loss.backward()
+
+    assert loss.item() >= 0
+    assert sae.encoder.weight.grad is not None
+    assert sae.decoder.weight.grad is not None
+    assert sae.encoder.weight.grad[dead].abs().sum().item() > 0
+    assert sae.decoder.weight.grad[:, dead].abs().sum().item() > 0

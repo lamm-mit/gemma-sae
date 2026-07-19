@@ -100,7 +100,10 @@ def test_publish_dry_run_never_calls_hugging_face(tmp_path: Path, monkeypatch) -
 def test_publish_uses_hugging_face_api_contract(tmp_path: Path, monkeypatch) -> None:
     config = _trained_tiny_config(tmp_path, monkeypatch)
     run_dir = Path(config.sae.run_dir)
-    (run_dir / "evaluation.json").write_text("{}", encoding="utf-8")
+    (run_dir / "evaluation.json").write_text(
+        '{"metrics": {"active_feature_fraction": 1.0}}',
+        encoding="utf-8",
+    )
     (run_dir / "fidelity.json").write_text("{}", encoding="utf-8")
     calls = {}
 
@@ -127,3 +130,16 @@ def test_publish_uses_hugging_face_api_contract(tmp_path: Path, monkeypatch) -> 
     assert result["commit_url"].endswith("/commit/1")
     assert calls["create_repo"]["private"] is False
     assert calls["upload_folder"]["repo_id"] == "lamm-mit/test-sae"
+
+
+def test_publish_refuses_low_active_feature_fraction(tmp_path: Path, monkeypatch) -> None:
+    config = _trained_tiny_config(tmp_path, monkeypatch)
+    run_dir = Path(config.sae.run_dir)
+    (run_dir / "evaluation.json").write_text(
+        '{"metrics": {"active_feature_fraction": 0.25}}',
+        encoding="utf-8",
+    )
+    (run_dir / "fidelity.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="quality gates"):
+        publish_release(config)

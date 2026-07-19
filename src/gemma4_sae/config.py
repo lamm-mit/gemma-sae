@@ -54,7 +54,10 @@ class SAEConfig:
     warmup_steps: int = 1_000
     gradient_clip_norm: float = 1.0
     threshold_ema_decay: float = 0.999
+    auxiliary_loss_coefficient: float = 0.03125
+    auxiliary_top_k: int = 512
     dead_after_steps: int = 2_500
+    resample_dead_features: bool = False
     resample_every_steps: int = 2_500
     max_resamples_per_event: int = 512
     checkpoint_every_steps: int = 2_500
@@ -82,6 +85,7 @@ class PublicationConfig:
     hf_repo_id: str = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
     private: bool = True
     include_feature_reports: bool = False
+    min_active_feature_fraction: float = 0.9
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,16 @@ class ProjectConfig:
             raise ValueError("sae.expansion_factor must be at least 1.")
         if self.sae.target_l0 < 1:
             raise ValueError("sae.target_l0 must be positive.")
+        if self.sae.auxiliary_loss_coefficient < 0:
+            raise ValueError("sae.auxiliary_loss_coefficient must be non-negative.")
+        if self.sae.auxiliary_top_k < 1:
+            raise ValueError("sae.auxiliary_top_k must be positive.")
+        if self.sae.dead_after_steps < 1:
+            raise ValueError("sae.dead_after_steps must be positive.")
+        if self.sae.resample_every_steps < 1:
+            raise ValueError("sae.resample_every_steps must be positive.")
+        if self.sae.max_resamples_per_event < 0:
+            raise ValueError("sae.max_resamples_per_event must be non-negative.")
         if not 0 <= self.sae.validation_fraction < 0.5:
             raise ValueError("sae.validation_fraction must be in [0, 0.5).")
         if self.evaluation.input_format not in {"text", "messages"}:
@@ -139,6 +153,8 @@ class ProjectConfig:
         repo_parts = self.publication.hf_repo_id.split("/")
         if len(repo_parts) != 2 or not all(repo_parts):
             raise ValueError("publication.hf_repo_id must have the form owner/repository.")
+        if not 0 <= self.publication.min_active_feature_fraction <= 1:
+            raise ValueError("publication.min_active_feature_fraction must be in [0, 1].")
 
 
 def _strict_dataclass(cls: type[T], values: dict[str, Any]) -> T:

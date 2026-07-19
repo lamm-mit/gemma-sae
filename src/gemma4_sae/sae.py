@@ -13,6 +13,7 @@ class SAEOutput:
     features: Tensor
     selected_indices: Tensor
     batch_threshold: Tensor
+    preactivations: Tensor
 
 
 class BatchTopKSAE(nn.Module):
@@ -45,6 +46,7 @@ class BatchTopKSAE(nn.Module):
         self.register_buffer("threshold_initialized", torch.tensor(False))
 
         with torch.no_grad():
+            self.encoder.bias.zero_()
             self.decoder.weight.copy_(self.encoder.weight.T)
             self.normalize_decoder_()
 
@@ -90,13 +92,53 @@ class BatchTopKSAE(nn.Module):
         return self.decoder(features) + self.decoder_bias
 
     def forward(self, x: Tensor, use_threshold: bool | None = None) -> SAEOutput:
-        features, selected, threshold = self.encode(x, use_threshold=use_threshold)
+        dense = self.preactivations(x)
+        if use_threshold is None:
+            use_threshold = not self.training
+        if use_threshold:
+            features, selected, threshold = self._threshold_encode(dense)
+        else:
+            features, selected, threshold = self._batch_topk(dense)
         return SAEOutput(
             reconstruction=self.decode(features),
             features=features,
             selected_indices=selected,
             batch_threshold=threshold,
+            preactivations=dense,
         )
+
+    def auxiliary_dead_feature_loss(
+        self,
+        x: Tensor,
+        reconstruction: Tensor,
+        preactivations: Tensor,
+        dead_features: Tensor,
+        top_k: int,
+    ) -> Tensor:
+        """Reconstruct the main residual using each sample's top-k dead latents."""
+
+        if dead_features.shape != (self.n_features,) or dead_features.dtype != torch.bool:
+            raise ValueError("dead_features must be a boolean mask with shape [n_features].")
+        if top_k < 1:
+            raise ValueError("top_k must be positive.")
+        dead_count = int(dead_features.sum())
+        if dead_count == 0:
+            return reconstruction.float().sum() * 0.0
+
+        dead_preactivations = preactivations[:, dead_features]
+        k = min(top_k, dead_count)
+        values, indices = torch.topk(dead_preactivations, k=k, dim=-1, sorted=False)
+        auxiliary_features = torch.zeros_like(dead_preactivations).scatter(
+            -1,
+            indices,
+            values,
+        )
+        auxiliary_reconstruction = F.linear(
+            auxiliary_features,
+            self.decoder.weight[:, dead_features],
+        )
+        residual = x.float() - reconstruction.float()
+        return F.mse_loss(auxiliary_reconstruction.float(), residual)
 
     @torch.no_grad()
     def normalize_decoder_(self) -> None:

@@ -33,6 +33,28 @@ def missing_release_evidence(run_dir: Path) -> list[str]:
     ]
 
 
+def release_quality_failures(
+    run_dir: Path,
+    *,
+    min_active_feature_fraction: float,
+) -> list[str]:
+    evaluation_path = run_dir / "evaluation.json"
+    if not evaluation_path.exists():
+        return []
+    evaluation_report = _read_json(evaluation_path)
+    metrics = evaluation_report.get("metrics", evaluation_report)
+    active_fraction = metrics.get("active_feature_fraction")
+    if active_fraction is None:
+        return ["evaluation.json lacks metrics.active_feature_fraction"]
+    if float(active_fraction) < min_active_feature_fraction:
+        return [
+            "evaluation active_feature_fraction "
+            f"{float(active_fraction):.4f} is below the configured publication minimum "
+            f"{min_active_feature_fraction:.4f}"
+        ]
+    return []
+
+
 def _read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -88,6 +110,8 @@ not guaranteed uniquely true concepts.
 - dictionary width: {checkpoint["sae_state_dict"]["encoder.weight"].shape[0]}
 - expansion factor: {config.sae.expansion_factor}
 - training target L0: {config.sae.target_l0}
+- auxiliary dead-latent top-k: {config.sae.auxiliary_top_k}
+- auxiliary loss coefficient: {config.sae.auxiliary_loss_coefficient}
 - inference threshold: {float(checkpoint["sae_state_dict"]["inference_threshold"]):.8g}
 - activation normalization: subtract the released per-dimension mean, then divide by
   the released scalar global RMS
@@ -214,6 +238,8 @@ def build_release_bundle(
         "d_model": int(checkpoint["sae_state_dict"]["encoder.weight"].shape[1]),
         "n_features": int(checkpoint["sae_state_dict"]["encoder.weight"].shape[0]),
         "target_l0": int(checkpoint["target_l0"]),
+        "auxiliary_top_k": config.sae.auxiliary_top_k,
+        "auxiliary_loss_coefficient": config.sae.auxiliary_loss_coefficient,
         "threshold_ema_decay": float(checkpoint["threshold_ema_decay"]),
         "inference_threshold": float(
             checkpoint["sae_state_dict"]["inference_threshold"]
@@ -307,6 +333,10 @@ def publish_release(
         result["missing_required_evidence"] = missing_release_evidence(
             Path(config.sae.run_dir)
         )
+        result["quality_failures"] = release_quality_failures(
+            Path(config.sae.run_dir),
+            min_active_feature_fraction=config.publication.min_active_feature_fraction,
+        )
         return result
 
     missing = missing_release_evidence(Path(config.sae.run_dir))
@@ -314,6 +344,15 @@ def publish_release(
         raise RuntimeError(
             "Refusing to publish a run without required evidence: "
             + ", ".join(missing)
+        )
+    quality_failures = release_quality_failures(
+        Path(config.sae.run_dir),
+        min_active_feature_fraction=config.publication.min_active_feature_fraction,
+    )
+    if quality_failures:
+        raise RuntimeError(
+            "Refusing to publish a run that fails configured quality gates: "
+            + "; ".join(quality_failures)
         )
     token = read_hf_token()
     if not token:

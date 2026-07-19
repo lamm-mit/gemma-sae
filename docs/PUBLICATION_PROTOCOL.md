@@ -81,7 +81,15 @@ For every run, retain:
 - token count, wall-clock, device type, peak memory, and checkpoint cadence.
 
 Plot training/validation MSE, FVE, L0, inference threshold, dead-feature fraction,
-resampling events, and learning rate.
+auxiliary dead-latent loss, any resampling events, and learning rate.
+
+The preregistered BatchTopK objective must include the auxiliary reconstruction term
+described in the BatchTopK paper: each sample's top activations among currently dead
+latents reconstruct the main SAE residual. Record its top-k and coefficient. Treat a
+persistently high dead-feature fraction as a failed optimization run even when
+reconstruction FVE is high; do not select or publish such a checkpoint as the primary
+SAE. The checked-in release gate requires at least 90% of features to activate on the
+held-out evaluation scan; any change to that threshold must be preregistered and justified.
 
 ## 6. Required SAE-only evaluation
 

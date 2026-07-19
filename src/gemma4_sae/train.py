@@ -191,7 +191,9 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
 
     print(
         f"Training BatchTopK SAE on {device}: d_model={d_model}, features={n_features:,}, "
-        f"target L0={config.sae.target_l0}, steps={config.sae.max_steps:,}."
+        f"target L0={config.sae.target_l0}, steps={config.sae.max_steps:,}, "
+        f"auxiliary top-k={config.sae.auxiliary_top_k}, "
+        f"auxiliary coefficient={config.sae.auxiliary_loss_coefficient:g}."
     )
     started = time.perf_counter()
     last_checkpoint = requested_checkpoint
@@ -201,7 +203,20 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
         x = ((batch.activations.float() - mean) / scale).to(device)
         sae.train()
         output = sae(x, use_threshold=False)
-        loss = F.mse_loss(output.reconstruction, x)
+        active = output.selected_indices.unique()
+        last_active_step[active] = step
+        dead = (step - last_active_step) >= config.sae.dead_after_steps
+
+        reconstruction_mse = F.mse_loss(output.reconstruction, x)
+        auxiliary_mse = sae.auxiliary_dead_feature_loss(
+            x,
+            output.reconstruction,
+            output.preactivations,
+            dead,
+            config.sae.auxiliary_top_k,
+        )
+        auxiliary_loss = config.sae.auxiliary_loss_coefficient * auxiliary_mse
+        loss = reconstruction_mse + auxiliary_loss
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -212,14 +227,12 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
         sae.normalize_decoder_()
         sae.update_inference_threshold_(output.batch_threshold)
 
-        active = output.selected_indices.unique()
-        last_active_step[active] = step
         resampled = 0
         if (
-            step >= config.sae.dead_after_steps
+            config.sae.resample_dead_features
+            and step >= config.sae.dead_after_steps
             and step % config.sae.resample_every_steps == 0
         ):
-            dead = (step - last_active_step) >= config.sae.dead_after_steps
             dead_indices = dead.nonzero(as_tuple=False).flatten()
             if len(dead_indices) > config.sae.max_resamples_per_event:
                 permutation = torch.randperm(len(dead_indices), device=device)
@@ -238,6 +251,9 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
             record = {
                 "step": step,
                 "loss": loss.item(),
+                "reconstruction_mse": reconstruction_mse.item(),
+                "auxiliary_mse": auxiliary_mse.item(),
+                "auxiliary_loss": auxiliary_loss.item(),
                 "fraction_variance_explained": float(fve),
                 "mean_l0": mean_l0,
                 "dead_fraction": float(dead_fraction),
@@ -249,7 +265,8 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
             }
             append_jsonl(metrics_path, record)
             print(
-                f"step {step:7d} · mse {record['loss']:.5f} · "
+                f"step {step:7d} · mse {record['reconstruction_mse']:.5f} · "
+                f"aux {record['auxiliary_loss']:.5f} · "
                 f"FVE {record['fraction_variance_explained']:.3f} · "
                 f"L0 {mean_l0:.1f} · dead {record['dead_fraction']:.2%}"
             )
