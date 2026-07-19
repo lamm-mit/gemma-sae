@@ -361,7 +361,7 @@ gemma4-sae develop-labels \
   --n-features 64 \
   --ranking coverage \
   --train-contexts 8 \
-  --heldout-contexts 8 \
+  --heldout-contexts 4 \
   --provider openai \
   --model gpt-5.6 \
   --acknowledge-external-data \
@@ -372,7 +372,9 @@ This performs **two Gemma corpus passes**, followed by approximately two labelin
 calls per previously unlabeled feature when automatic scoring is enabled. Run it in
 `tmux` on the DGX. Existing registry entries are skipped, so the workflow can safely be
 rerun or expanded with a larger corpus. `--dry-run` still performs corpus selection and
-writes the evidence report, but does not call a labeling provider.
+writes the evidence report, but does not call a labeling provider. The four-per-class
+held-out setting above is for the 60-record demonstration; use 8–12 or more per class
+with a substantially larger validation corpus for a scientific study.
 
 JSONL records use this shape:
 
