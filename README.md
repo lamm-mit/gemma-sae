@@ -88,6 +88,7 @@ Gemma; training then consumes cached shards without loading Gemma.
   metrics
 - downstream language-model loss recovery from live SAE and mean-ablation interventions
 - automatic or explicit feature selection and top-context mining
+- corpus-driven feature selection with leakage-resistant development/validation splits
 - resumable, checkpoint-bound feature labeling with held-out automatic scoring
 - OpenAI, Anthropic, OpenAI-compatible, and local Transformers labeling backends
 - prompt-level explanations with per-token SAE feature IDs, strengths, and known contexts
@@ -319,6 +320,94 @@ gemma4-sae mine \
   --top-contexts 40 \
   --random-contexts 40
 ```
+
+### Develop labels from a prompt corpus
+
+Use `develop-labels` when the goal is to label features that matter for a particular
+scientific domain or prompt distribution. The command:
+
+1. reads a local `.jsonl`, `.json`, or `.txt` corpus;
+2. runs the development records through Gemma and the trained SAE;
+3. ranks all SAE features by corpus coverage, activation mass, or frequency;
+4. runs a second pass to collect strong development contexts and held-out validation
+   contexts for the selected features;
+5. generates and scores labels through the same checkpoint-bound registry used by
+   `label`.
+
+The repository includes a small, synthetic workflow example at
+[`examples/science_label_corpus.jsonl`](examples/science_label_corpus.jsonl). It contains
+explicit `development` and `validation` records across several scientific fields. It is a
+software demonstration with a small set of general-prose controls, not a benchmark or
+adequate evidence for a publication claim.
+
+After training has finished:
+
+```bash
+cd ~/gemma-sae
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install -e ".[notebook]"
+
+export CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml
+read -rsp "OpenAI API key: " OPENAI_API_KEY
+echo
+export OPENAI_API_KEY
+
+gemma4-sae develop-labels \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --corpus examples/science_label_corpus.jsonl \
+  --text-column text \
+  --n-features 64 \
+  --ranking coverage \
+  --train-contexts 8 \
+  --heldout-contexts 8 \
+  --provider openai \
+  --model gpt-5.6 \
+  --acknowledge-external-data \
+  2>&1 | tee logs/develop-science-labels.log
+```
+
+This performs **two Gemma corpus passes**, followed by approximately two labeling-model
+calls per previously unlabeled feature when automatic scoring is enabled. Run it in
+`tmux` on the DGX. Existing registry entries are skipped, so the workflow can safely be
+rerun or expanded with a larger corpus. `--dry-run` still performs corpus selection and
+writes the evidence report, but does not call a labeling provider.
+
+JSONL records use this shape:
+
+```json
+{"id":"paper-0001","split":"development","text":"First scientific passage..."}
+{"id":"paper-0002","split":"validation","text":"Independent held-out passage..."}
+```
+
+If no `split` field is present, the command creates a deterministic document-level split
+using `--validation-fraction` and the SAE seed. An explicit, frozen split is preferable
+for a paper. Feature ranking uses only development records; validation records are used
+only as held-out positive and negative contexts. Label evidence identifies the exact
+target token inside each context window, and corpus validation keeps at most one example
+per document in each class; negative controls come from documents in which the feature
+never fired. A feature cannot receive `auto_validated` status unless the
+requested number of held-out positive and negative examples are both available. The
+default `coverage` score is:
+
+```text
+mean_active_activation × sqrt(token_frequency × document_frequency)
+```
+
+Use `--ranking activation-mass` to prioritize total activation contribution or
+`--ranking frequency` to prioritize how often features fire. Selection scores, corpus
+SHA-256, split policy, checkpoint identity, context partitions, and runtime metadata are
+stored under:
+
+```text
+runs/.../corpus_reports/<corpus-name>-<corpus-sha>-<analysis-sha>/features.json
+```
+
+Validated labels are merged into `runs/.../feature_labels/labels.json`; subsequent
+`gemma4-sae explain` calls load them automatically. The label describes a feature of the
+SAE checkpoint, but its validation evidence is specific to the corpus domain. Do not
+generalize a science-corpus validation score to unrelated prose without a separate test.
 
 ### Label mined features once
 
@@ -597,6 +686,24 @@ The instruction-tuned configuration uses the MIT-licensed
 [`HuggingFaceH4/ultrachat_200k`](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k)
 `messages` column. Conversation roles and contents are rendered with the pinned E4B-IT
 tokenizer's chat template before packing.
+
+For corpus-driven feature selection or a future domain-specific SAE, useful Hugging Face
+sources include:
+
+| Dataset | Best use | Important caveat |
+|---|---|---|
+| [`allenai/peS2o`](https://huggingface.co/datasets/allenai/peS2o) | broad scientific-paper language across STEM fields | large; dataset is ODC-By, and source-document terms still require review |
+| [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | educational explanations and general-domain controls | web-derived content; retain attribution and review source rights |
+| [`HuggingFaceTB/finemath`](https://huggingface.co/datasets/HuggingFaceTB/finemath) | mathematical exposition and notation | web-derived and specialized; pair with general text |
+| [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | broad reference prose and matched non-paper controls | GFDL/CC BY-SA attribution and share-alike requirements apply |
+| [`allenai/sciq`](https://huggingface.co/datasets/allenai/sciq) | science questions, answers, and supporting passages | CC BY-NC 3.0; non-commercial restriction |
+| [`allenai/dolma`](https://huggingface.co/datasets/allenai/dolma) | a documented general/science mixture, including peS2o | multi-source corpus; review each original source's terms |
+
+Pin the exact dataset revision, sample by document rather than isolated sentence, remove
+duplicates before splitting, retain stable IDs, and keep validation documents disjoint
+from feature selection. For a science-focused comparison, start with a separately trained
+70–80% general / 20–30% scientific mixture rather than continuing the existing FineWeb
+checkpoint in place. Preserve the current FineWeb SAE as the baseline.
 
 - `max_activation_tokens`: number of non-special token activations to keep.
 - `tokens_per_shard`: 65,536 rows produces roughly 336 MB activation files.

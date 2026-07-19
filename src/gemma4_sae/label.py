@@ -719,16 +719,51 @@ def _deduplicate_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]
     result = []
     for context in contexts:
         text = str(context.get("text", ""))
-        digest = canonical_sha256({"text": text})
+        digest = canonical_sha256(
+            {
+                "text": text,
+                "activating_token": context.get("activating_token"),
+            }
+        )
         if not text or digest in seen:
             continue
         seen.add(digest)
-        result.append(
-            {
-                "activation": float(context.get("activation", 0.0)),
-                "text": text,
-            }
-        )
+        item = {
+            "activation": float(context.get("activation", 0.0)),
+            "text": text,
+        }
+        for field in (
+            "activating_token",
+            "document_id",
+            "evidence_split",
+            "token_position",
+        ):
+            if field in context:
+                item[field] = context[field]
+        result.append(item)
+    return result
+
+
+def _one_per_document(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_documents = set()
+    result = []
+    for context in contexts:
+        document_id = context.get("document_id")
+        if document_id is not None and document_id in seen_documents:
+            continue
+        if document_id is not None:
+            seen_documents.add(document_id)
+        result.append(context)
+    return result
+
+
+def _model_context(context: dict[str, Any], *, activation: float) -> dict[str, Any]:
+    result = {
+        "activation": activation,
+        "text": context["text"],
+    }
+    if context.get("activating_token") is not None:
+        result["target_token"] = context["activating_token"]
     return result
 
 
@@ -742,21 +777,67 @@ def _feature_evidence(
     random_active = _deduplicate_contexts(feature.get("random_active_contexts", []))
     negatives = _deduplicate_contexts(feature.get("negative_contexts", []))
 
-    train_positive = top[:train_contexts]
-    positive_seen = {canonical_sha256({"text": item["text"]}) for item in train_positive}
+    split_aware = any(
+        "evidence_split" in item
+        for item in [*top, *random_active, *negatives]
+    )
+    if split_aware:
+        development_positive = _one_per_document([
+            item for item in top if item.get("evidence_split") == "development"
+        ])
+        validation_positive = _one_per_document([
+            item
+            for item in [*random_active, *top]
+            if item.get("evidence_split") == "validation"
+        ])
+        development_negative = _one_per_document([
+            item
+            for item in negatives
+            if item.get("evidence_split") == "development"
+        ])
+        validation_negative = _one_per_document([
+            item
+            for item in negatives
+            if item.get("evidence_split") == "validation"
+        ])
+        train_positive = development_positive[:train_contexts]
+        heldout_positive_candidates = validation_positive
+        train_negative = development_negative[:train_contexts]
+        heldout_negative = validation_negative[:heldout_contexts]
+    else:
+        train_positive = top[:train_contexts]
+        heldout_positive_candidates = [*random_active, *top[train_contexts:]]
+        train_negative = negatives[:train_contexts]
+        heldout_negative = negatives[train_contexts : train_contexts + heldout_contexts]
+    positive_seen = {
+        canonical_sha256(
+            {
+                "text": item["text"],
+                "activating_token": item.get("activating_token"),
+            }
+        )
+        for item in train_positive
+    }
     heldout_positive = [
         item
-        for item in [*random_active, *top[train_contexts:]]
-        if canonical_sha256({"text": item["text"]}) not in positive_seen
+        for item in heldout_positive_candidates
+        if canonical_sha256(
+            {
+                "text": item["text"],
+                "activating_token": item.get("activating_token"),
+            }
+        )
+        not in positive_seen
     ][:heldout_contexts]
-    train_negative = negatives[:train_contexts]
-    heldout_negative = negatives[train_contexts : train_contexts + heldout_contexts]
     training = {
         "feature_id": int(feature["feature_id"]),
         "activation_frequency": float(feature.get("activation_frequency", 0.0)),
-        "positive_examples": train_positive,
+        "positive_examples": [
+            _model_context(item, activation=item["activation"])
+            for item in train_positive
+        ],
         "zero_activation_examples": [
-            {"activation": 0.0, "text": item["text"]}
+            _model_context(item, activation=0.0)
             for item in train_negative
         ],
     }
@@ -764,6 +845,7 @@ def _feature_evidence(
         {
             "example_id": f"e{index:03d}",
             "text": item["text"],
+            "target_token": item.get("activating_token"),
             "actual_activation": item["activation"],
             "actual_active": True,
         }
@@ -774,6 +856,7 @@ def _feature_evidence(
         {
             "example_id": f"e{index + negative_offset:03d}",
             "text": item["text"],
+            "target_token": item.get("activating_token"),
             "actual_activation": 0.0,
             "actual_active": False,
         }
@@ -870,7 +953,10 @@ def _score_predictions(
 def _label_prompt(training: dict[str, Any]) -> str:
     return """Infer a concise feature interpretation from this evidence.
 
-Positive examples include the measured activation. Zero-activation examples are controls.
+Positive examples include the measured activation at `target_token` when that field is present.
+Zero-activation examples are controls measured at their target token. Infer token-level behavior
+rather than treating the entire passage as active; legacy evidence without `target_token` must be
+interpreted from its context window.
 Prefer a rule that distinguishes both groups. Use confidence="uninterpretable" when no coherent,
 specific rule is supported. Do not mention the feature ID in the label.
 
@@ -882,11 +968,15 @@ def _score_prompt(
     interpretation: dict[str, Any],
     examples: list[dict[str, Any]],
 ) -> str:
-    blinded = [
-        {"example_id": example["example_id"], "text": example["text"]}
-        for example in examples
-    ]
-    return """Predict feature activation from the proposed interpretation on every blinded example.
+    blinded = []
+    for example in examples:
+        item = {"example_id": example["example_id"], "text": example["text"]}
+        if example.get("target_token") is not None:
+            item["target_token"] = example["target_token"]
+        blinded.append(item)
+    return """Predict feature activation at `target_token`, when supplied, from the proposed
+interpretation on every blinded example. The surrounding text is context; do not score the passage
+as a whole. Legacy examples without `target_token` must be judged from the context window.
 
 Use this ordinal scale:
 0 = definitely inactive
@@ -1067,10 +1157,11 @@ def label_features(
             "heldout_examples": heldout,
         }
         _write_json_atomic(evidence_path, evidence_snapshot)
+        label_prompt = _label_prompt(training)
         interpretation, generation_metadata = _call_validated(
             primary,
             system=LABEL_SYSTEM_PROMPT,
-            prompt=_label_prompt(training),
+            prompt=label_prompt,
             schema=LABEL_SCHEMA,
             schema_name="sae_feature_interpretation",
             validator=_validate_label,
@@ -1086,12 +1177,18 @@ def label_features(
         )
         positive_count = sum(example["actual_active"] for example in heldout)
         negative_count = len(heldout) - positive_count
-        if score and positive_count > 0 and negative_count > 0:
+        scoring_prompt = None
+        if (
+            score
+            and positive_count >= heldout_contexts
+            and negative_count >= heldout_contexts
+        ):
             expected_ids = {example["example_id"] for example in heldout}
+            scoring_prompt = _score_prompt(interpretation, heldout)
             predictions, scoring_metadata = _call_validated(
                 scorer,
                 system=SCORER_SYSTEM_PROMPT,
-                prompt=_score_prompt(interpretation, heldout),
+                prompt=scoring_prompt,
                 schema=SCORE_SCHEMA,
                 schema_name="sae_feature_activation_predictions",
                 validator=lambda value, ids=expected_ids: _validate_predictions(
@@ -1114,7 +1211,10 @@ def label_features(
         elif score:
             validation = {
                 "heldout_examples": len(heldout),
-                "status": "insufficient_positive_and_negative_controls",
+                "positive_examples": positive_count,
+                "negative_examples": negative_count,
+                "required_per_class": heldout_contexts,
+                "status": "insufficient_heldout_examples_per_class",
             }
 
         previous = records.get(feature_id)
@@ -1136,9 +1236,18 @@ def label_features(
                 "heldout_text_in_registry": False,
                 "local_snapshot_in_release": False,
             },
-            "generation": _provider_record(provider_spec, generation_metadata),
+            "generation": {
+                **_provider_record(provider_spec, generation_metadata),
+                "prompt_sha256": canonical_sha256({"prompt": label_prompt}),
+            },
             "scoring": (
-                _provider_record(scorer_spec or provider_spec, scoring_metadata)
+                {
+                    **_provider_record(
+                        scorer_spec or provider_spec,
+                        scoring_metadata,
+                    ),
+                    "prompt_sha256": canonical_sha256({"prompt": scoring_prompt}),
+                }
                 if scoring_metadata
                 else None
             ),
@@ -1163,12 +1272,17 @@ def label_features(
     return destination
 
 
-def add_label_arguments(parser: argparse.ArgumentParser) -> None:
+def add_label_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_report_arguments: bool = True,
+) -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", default="latest")
-    parser.add_argument("--report", default=None)
+    if include_report_arguments:
+        parser.add_argument("--report", default=None)
+        parser.add_argument("--features", type=int, nargs="*", default=None)
     parser.add_argument("--registry", default=None)
-    parser.add_argument("--features", type=int, nargs="*", default=None)
     parser.add_argument(
         "--provider",
         choices=("openai", "anthropic", "openai-compatible", "transformers"),
@@ -1212,7 +1326,11 @@ def _default_key_env(provider: str) -> str:
     return "OPENAI_API_KEY"
 
 
-def _spec_from_args(args: argparse.Namespace, *, scorer: bool = False) -> ProviderSpec:
+def provider_spec_from_args(
+    args: argparse.Namespace,
+    *,
+    scorer: bool = False,
+) -> ProviderSpec:
     if scorer:
         provider = args.scorer_provider or args.provider
         model = args.scorer_model or args.model
@@ -1251,8 +1369,12 @@ def run_from_args(args: argparse.Namespace) -> Path:
         report_path=args.report,
         registry_path=args.registry,
         feature_ids=args.features,
-        provider_spec=_spec_from_args(args),
-        scorer_spec=_spec_from_args(args, scorer=True) if scorer_requested else None,
+        provider_spec=provider_spec_from_args(args),
+        scorer_spec=(
+            provider_spec_from_args(args, scorer=True)
+            if scorer_requested
+            else None
+        ),
         train_contexts=args.train_contexts,
         heldout_contexts=args.heldout_contexts,
         score=not args.no_score,

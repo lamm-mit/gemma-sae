@@ -194,28 +194,31 @@ def mine(
         "features": [],
     }
     for feature_id in feature_ids:
-        contexts = [
-            {
+        def decode_context(
+            activation: float,
+            token_ids: list[int],
+        ) -> dict[str, object]:
+            center_index = min(config.data.context_radius, len(token_ids) - 1)
+            return {
                 "activation": activation,
                 "text": tokenizer.decode(token_ids, skip_special_tokens=True),
                 "token_ids": token_ids,
+                "activating_token": tokenizer.decode(
+                    [token_ids[center_index]],
+                    skip_special_tokens=False,
+                ),
             }
+
+        contexts = [
+            decode_context(activation, token_ids)
             for activation, token_ids in sorted(heaps[feature_id], reverse=True)
         ]
         sampled_active_contexts = [
-            {
-                "activation": activation,
-                "text": tokenizer.decode(token_ids, skip_special_tokens=True),
-                "token_ids": token_ids,
-            }
+            decode_context(activation, token_ids)
             for activation, token_ids in random_active[feature_id]
         ]
         sampled_negative_contexts = [
-            {
-                "activation": 0.0,
-                "text": tokenizer.decode(token_ids, skip_special_tokens=True),
-                "token_ids": token_ids,
-            }
+            decode_context(0.0, token_ids)
             for _, token_ids in random_negative[feature_id]
         ]
         report["features"].append(

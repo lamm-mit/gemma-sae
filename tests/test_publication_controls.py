@@ -53,6 +53,7 @@ def test_unified_cli_has_all_pipeline_commands() -> None:
     for command in (
         "doctor",
         "collect",
+        "develop-labels",
         "verify",
         "train",
         "evaluate",
@@ -67,5 +68,16 @@ def test_unified_cli_has_all_pipeline_commands() -> None:
             arguments.extend(["--text", "hello"])
         if command == "label":
             arguments.extend(["--provider", "transformers", "--model", "test/model"])
+        if command == "develop-labels":
+            arguments.extend(
+                [
+                    "--corpus",
+                    "corpus.jsonl",
+                    "--provider",
+                    "transformers",
+                    "--model",
+                    "test/model",
+                ]
+            )
         namespace = parser.parse_args(arguments)
         assert namespace.command == command

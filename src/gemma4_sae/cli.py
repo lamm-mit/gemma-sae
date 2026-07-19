@@ -5,6 +5,8 @@ import json
 
 from .collect import collect
 from .config import load_config
+from .develop import add_develop_arguments
+from .develop import run_from_args as develop_from_args
 from .doctor import diagnose
 from .evaluate import evaluate
 from .explain import add_explain_arguments
@@ -75,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_label_arguments(label_parser)
 
+    develop_parser = subparsers.add_parser(
+        "develop-labels",
+        help="Select and label important SAE features from a local corpus.",
+    )
+    add_develop_arguments(develop_parser)
+
     mine_parser = subparsers.add_parser(
         "mine",
         help="Mine top activating token contexts.",
@@ -124,6 +132,8 @@ def main() -> None:
         print(json.dumps(explain_from_args(args), indent=2, ensure_ascii=False))
     elif args.command == "label":
         label_from_args(args)
+    elif args.command == "develop-labels":
+        develop_from_args(args)
     elif args.command == "mine":
         mine(
             config,

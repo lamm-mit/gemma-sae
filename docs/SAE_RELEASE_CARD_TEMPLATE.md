@@ -75,6 +75,9 @@ Attach the complete reconstruction–sparsity frontier.
 ## Feature quality
 
 - Feature sampling policy:
+- Corpus-driven selection file SHA-256, if used:
+- Development/validation split policy:
+- Feature-ranking formula and eligibility thresholds:
 - Number of features reviewed:
 - Held-out top-context protocol:
 - Negative-context protocol:

@@ -284,3 +284,61 @@ def test_openai_and_anthropic_use_structured_output_contracts(monkeypatch) -> No
     ).value == {"ok": True}
     assert calls[0][2]["text"]["format"]["strict"] is True
     assert calls[1][2]["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_corpus_evidence_keeps_development_and_validation_separate() -> None:
+    feature = {
+        "feature_id": 4,
+        "activation_frequency": 0.1,
+        "top_contexts": [
+            {
+                "activation": 4.0,
+                "text": "development positive",
+                "activating_token": "positive",
+                "document_id": "development-positive",
+                "evidence_split": "development",
+            }
+        ],
+        "random_active_contexts": [
+            {
+                "activation": 2.0,
+                "text": "validation positive",
+                "activating_token": "positive",
+                "document_id": "validation-positive",
+                "evidence_split": "validation",
+            }
+        ],
+        "negative_contexts": [
+            {
+                "activation": 0.0,
+                "text": "development negative",
+                "activating_token": "negative",
+                "document_id": "development-negative",
+                "evidence_split": "development",
+            },
+            {
+                "activation": 0.0,
+                "text": "validation negative",
+                "activating_token": "negative",
+                "document_id": "validation-negative",
+                "evidence_split": "validation",
+            },
+        ],
+    }
+    training, heldout = label_module._feature_evidence(
+        feature,
+        train_contexts=1,
+        heldout_contexts=1,
+    )
+    assert training["positive_examples"][0]["text"] == "development positive"
+    assert training["positive_examples"][0]["target_token"] == "positive"
+    assert training["zero_activation_examples"][0]["text"] == "development negative"
+    assert training["zero_activation_examples"][0]["target_token"] == "negative"
+    assert {example["text"] for example in heldout} == {
+        "validation positive",
+        "validation negative",
+    }
+    assert {example["target_token"] for example in heldout} == {
+        "positive",
+        "negative",
+    }

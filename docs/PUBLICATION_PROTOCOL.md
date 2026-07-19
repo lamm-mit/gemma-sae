@@ -131,6 +131,15 @@ Feature names are hypotheses. For a sampled and preregistered feature set:
 - test feature specificity, not just sensitivity;
 - inspect token-position, template, language, and formatting confounds.
 
+For task- or corpus-selected features, freeze the corpus and selection policy before
+examining labels. `gemma4-sae develop-labels` records the local file hash and ranks
+features only on a development partition; the validation partition supplies held-out
+positive and negative target-token contexts, with at most one scored example per document
+and class. Report the ranking formula, eligibility thresholds,
+requested and retained feature counts, document/token coverage, and whether the corpus
+was selected before or after the research hypothesis. A synthetic example corpus is
+appropriate only for pipeline testing.
+
 The checked-in `gemma4-sae label` protocol uses a checkpoint-bound, resumable registry.
 It separates examples used to propose an interpretation from blinded held-out positive
 and zero-activation contexts used for scoring. Record the provider, exact model ID,
