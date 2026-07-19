@@ -302,6 +302,9 @@ gemma4-sae publish \
   --dry-run
 ```
 
+`fidelity` runs three live-model passes and displays separate `tqdm` progress bars for
+the baseline, SAE reconstruction, and mean-ablation phases.
+
 Detach from `tmux` with `Ctrl-B`, then `D`; reconnect with
 `tmux attach -t gemma-sae`.
 

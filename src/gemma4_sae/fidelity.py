@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from torch import Tensor
+from tqdm.auto import tqdm
 
 from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
@@ -79,6 +80,8 @@ def mean_language_model_loss(
     blocks: list[Tensor],
     batch_size: int,
     intervention=None,
+    *,
+    progress_description: str | None = None,
 ) -> tuple[float, int, list[float]]:
     if batch_size != 1:
         raise ValueError("Fidelity evaluation requires batch_size=1.")
@@ -87,8 +90,17 @@ def mean_language_model_loss(
     predicted_tokens = 0
     sequence_losses = []
     context = intervention if intervention is not None else nullcontext()
+    batches = batched(blocks, batch_size)
+    if progress_description is not None:
+        batches = tqdm(
+            batches,
+            total=(len(blocks) + batch_size - 1) // batch_size,
+            desc=progress_description,
+            unit="batch",
+            dynamic_ncols=True,
+        )
     with context:
-        for input_ids in batched(blocks, batch_size):
+        for input_ids in batches:
             input_ids = input_ids.to(input_device)
             attention_mask = torch.ones_like(input_ids)
             outputs = model(
@@ -179,6 +191,7 @@ def fidelity(config: ProjectConfig, checkpoint_request: str) -> dict:
         model,
         blocks,
         config.evaluation.batch_size,
+        progress_description="Fidelity baseline",
     )
     sae_loss, _, sae_sequence_losses = mean_language_model_loss(
         model,
@@ -192,6 +205,7 @@ def fidelity(config: ProjectConfig, checkpoint_request: str) -> dict:
             activation_mean=checkpoint["activation_mean"],
             activation_scale=checkpoint["activation_scale"],
         ),
+        progress_description="Fidelity SAE",
     )
     mean_ablation_loss, _, mean_sequence_losses = mean_language_model_loss(
         model,
@@ -205,6 +219,7 @@ def fidelity(config: ProjectConfig, checkpoint_request: str) -> dict:
             activation_mean=checkpoint["activation_mean"],
             activation_scale=checkpoint["activation_scale"],
         ),
+        progress_description="Fidelity mean ablation",
     )
     denominator = mean_ablation_loss - baseline_loss
     loss_recovered = (
