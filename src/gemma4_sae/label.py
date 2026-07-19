@@ -201,6 +201,10 @@ class JSONModel:
         raise NotImplementedError
 
 
+class RetryableProviderResponseError(RuntimeError):
+    """A provider returned a valid response envelope without a usable result."""
+
+
 class OpenAIResponsesModel(JSONModel):
     external = True
 
@@ -243,6 +247,23 @@ class OpenAIResponsesModel(JSONModel):
             },
             timeout_seconds=self.timeout_seconds,
         )
+        if response.get("status") == "incomplete":
+            incomplete_details = response.get("incomplete_details")
+            reason = (
+                incomplete_details.get("reason")
+                if isinstance(incomplete_details, dict)
+                else None
+            )
+            suggestion = (
+                " Increase --max-output-tokens; reasoning tokens share this allowance."
+                if reason == "max_output_tokens"
+                else ""
+            )
+            raise RetryableProviderResponseError(
+                "OpenAI response was incomplete "
+                f"(response_id={response.get('id')}, reason={reason or 'unknown'}, "
+                f"max_output_tokens={self.max_output_tokens}).{suggestion}"
+            )
         texts = [
             item["text"]
             for output in response.get("output", [])
@@ -601,12 +622,22 @@ def _call_validated(
     attempt_prompt = prompt
     last_error: Exception | None = None
     for attempt in range(retries + 1):
-        result = model.generate(
-            system=system,
-            prompt=attempt_prompt,
-            schema=schema,
-            schema_name=schema_name,
-        )
+        try:
+            result = model.generate(
+                system=system,
+                prompt=attempt_prompt,
+                schema=schema,
+                schema_name=schema_name,
+            )
+        except RetryableProviderResponseError as error:
+            last_error = error
+            if attempt < retries:
+                tqdm.write(
+                    f"{error} Retrying provider request "
+                    f"({attempt + 2}/{retries + 1})."
+                )
+                continue
+            break
         try:
             return validator(result.value), {
                 **result.metadata,
@@ -620,7 +651,7 @@ def _call_validated(
                 + str(error)
                 + "\nReturn a corrected JSON object only."
             )
-    raise RuntimeError(f"Model output failed validation after retries: {last_error}")
+    raise RuntimeError(f"Model request failed after {retries + 1} attempts: {last_error}")
 
 
 def checkpoint_identity(
@@ -1005,6 +1036,7 @@ def _provider_record(spec: ProviderSpec, metadata: dict[str, Any]) -> dict[str, 
         "response_id": metadata.get("response_id"),
         "usage": metadata.get("usage"),
         "attempts": metadata.get("attempts"),
+        "max_output_tokens": spec.max_output_tokens,
         "base_url": spec.base_url if spec.provider == "openai-compatible" else None,
         "model_revision": spec.revision,
     }
@@ -1299,7 +1331,15 @@ def add_label_arguments(
         default="auto",
     )
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--max-output-tokens", type=int, default=1024)
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Maximum reasoning-plus-output tokens. Defaults to 25000 for OpenAI "
+            "Responses models and 1024 for other providers."
+        ),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument("--train-contexts", type=int, default=12)
     parser.add_argument("--heldout-contexts", type=int, default=12)
@@ -1343,6 +1383,11 @@ def provider_spec_from_args(
         model = args.model
         base_url = args.base_url
         api_key_env = args.api_key_env or _default_key_env(provider)
+    max_output_tokens = args.max_output_tokens
+    if max_output_tokens is None:
+        max_output_tokens = 25_000 if provider == "openai" else 1_024
+    if max_output_tokens < 1:
+        raise ValueError("--max-output-tokens must be positive.")
     return ProviderSpec(
         provider=provider,
         model=model,
@@ -1355,7 +1400,7 @@ def provider_spec_from_args(
         ),
         device=args.device,
         dtype=args.dtype,
-        max_output_tokens=args.max_output_tokens,
+        max_output_tokens=max_output_tokens,
         timeout_seconds=args.timeout_seconds,
         trust_remote_code=args.trust_remote_code,
     )

@@ -367,6 +367,7 @@ gemma4-sae develop-labels \
   --heldout-contexts 4 \
   --provider openai \
   --model gpt-5.6 \
+  --max-output-tokens 25000 \
   --acknowledge-external-data \
   2>&1 | tee logs/develop-science-labels.log
 ```
@@ -378,6 +379,14 @@ rerun or expanded with a larger corpus. `--dry-run` still performs corpus select
 writes the evidence report, but does not call a labeling provider. The four-per-class
 held-out setting above is for the 60-record demonstration; use 8–12 or more per class
 with a substantially larger validation corpus for a scientific study.
+
+OpenAI reasoning tokens and visible structured output share `--max-output-tokens`.
+The OpenAI provider therefore defaults to 25,000; other providers default to 1,024.
+If the Responses API returns `status=incomplete`, the CLI reports
+`incomplete_details.reason`, retries according to `--retries`, and keeps every feature
+already written to the registry. To resume without repeating the two Gemma corpus passes,
+run `gemma4-sae label --report <the-written-corpus-report>/features.json` with the same
+labeling and validation arguments. Existing feature IDs are skipped automatically.
 
 JSONL records use this shape:
 
@@ -444,6 +453,7 @@ gemma4-sae label \
   --checkpoint latest \
   --provider openai \
   --model gpt-5.6 \
+  --max-output-tokens 25000 \
   --acknowledge-external-data
 ```
 

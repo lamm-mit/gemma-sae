@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -13,9 +14,12 @@ from gemma4_sae.label import (
     ModelResult,
     OpenAIResponsesModel,
     ProviderSpec,
+    RetryableProviderResponseError,
+    add_label_arguments,
     checkpoint_identity,
     label_features,
     load_label_registry,
+    provider_spec_from_args,
 )
 from gemma4_sae.provenance import canonical_sha256, file_sha256, training_config_sha256
 
@@ -284,6 +288,79 @@ def test_openai_and_anthropic_use_structured_output_contracts(monkeypatch) -> No
     ).value == {"ok": True}
     assert calls[0][2]["text"]["format"]["strict"] is True
     assert calls[1][2]["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_openai_incomplete_response_exposes_reason_and_budget(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
+    monkeypatch.setattr(
+        label_module,
+        "_post_json",
+        lambda *_args, **_kwargs: {
+            "id": "resp-incomplete",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+        },
+    )
+    model = OpenAIResponsesModel(
+        "gpt-example",
+        api_key_env="OPENAI_API_KEY",
+        base_url="https://api.openai.com/v1",
+        max_output_tokens=1024,
+        timeout_seconds=30,
+    )
+    with pytest.raises(
+        RetryableProviderResponseError,
+        match=r"reason=max_output_tokens, max_output_tokens=1024",
+    ):
+        model.generate(
+            system="system",
+            prompt="prompt",
+            schema={"type": "object"},
+            schema_name="test",
+        )
+
+
+def test_validated_call_retries_incomplete_provider_response() -> None:
+    class IncompleteOnceModel(label_module.JSONModel):
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RetryableProviderResponseError("temporary incomplete response")
+            return ModelResult({"ok": True}, {"response_id": "retry-success"})
+
+    model = IncompleteOnceModel()
+    value, metadata = label_module._call_validated(
+        model,
+        system="system",
+        prompt="prompt",
+        schema={"type": "object"},
+        schema_name="test",
+        validator=lambda result: result,
+        retries=1,
+    )
+    assert value == {"ok": True}
+    assert metadata["attempts"] == 2
+    assert model.calls == 2
+
+
+def test_openai_provider_uses_reasoning_safe_default_output_budget() -> None:
+    parser = argparse.ArgumentParser()
+    add_label_arguments(parser)
+    args = parser.parse_args(
+        [
+            "--config",
+            "config.yaml",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-example",
+        ]
+    )
+    assert provider_spec_from_args(args).max_output_tokens == 25_000
 
 
 def test_corpus_evidence_keeps_development_and_validation_separate() -> None:
