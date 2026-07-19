@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gemma4-sae"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reproducible sparse-autoencoder training for Gemma 4 residual-stream activations"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -54,6 +54,7 @@ gemma4-sae-collect = "gemma4_sae.collect:main"
 gemma4-sae-doctor = "gemma4_sae.doctor:main"
 gemma4-sae-train = "gemma4_sae.train:main"
 gemma4-sae-evaluate = "gemma4_sae.evaluate:main"
+gemma4-sae-explain = "gemma4_sae.explain:main"
 gemma4-sae-fidelity = "gemma4_sae.fidelity:main"
 gemma4-sae-mine = "gemma4_sae.mine:main"
 gemma4-sae-publish = "gemma4_sae.release:main"

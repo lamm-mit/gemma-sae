@@ -7,6 +7,8 @@ from .collect import collect
 from .config import load_config
 from .doctor import diagnose
 from .evaluate import evaluate
+from .explain import add_explain_arguments
+from .explain import run_from_args as explain_from_args
 from .fidelity import fidelity
 from .mine import mine
 from .release import publish_release
@@ -59,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     fidelity_parser.add_argument("--config", required=True)
     fidelity_parser.add_argument("--checkpoint", default="latest")
 
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="Explain a new prompt with a trained SAE.",
+    )
+    add_explain_arguments(explain_parser)
+
     mine_parser = subparsers.add_parser(
         "mine",
         help="Mine top activating token contexts.",
@@ -103,6 +111,8 @@ def main() -> None:
         evaluate(config, args.checkpoint, args.max_batches)
     elif args.command == "fidelity":
         fidelity(config, args.checkpoint)
+    elif args.command == "explain":
+        print(json.dumps(explain_from_args(args), indent=2, ensure_ascii=False))
     elif args.command == "mine":
         mine(
             config,

@@ -88,6 +88,7 @@ Gemma; training then consumes cached shards without loading Gemma.
   metrics
 - downstream language-model loss recovery from live SAE and mean-ablation interventions
 - automatic or explicit feature selection and top-context mining
+- prompt-level explanations with per-token SAE feature IDs, strengths, and known contexts
 - inference-only `safetensors` release bundles, model cards, and SHA-256 checksums
 - an explicit Hugging Face publisher configured for the `lamm-mit` organization
 - checkpoint/config/activation compatibility checks before resume or evaluation
@@ -121,6 +122,8 @@ GEMMA4_SAE_CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml \
 ```
 
 Use `configs/e4b_layer20_batchtopk.yaml` instead when analyzing the smaller pilot run.
+Set `GEMMA4_SAE_EXPLANATION=runs/prompt-paris.json` as well to render a saved prompt's
+token-by-feature heatmap.
 
 For development:
 
@@ -201,6 +204,7 @@ gemma4-sae verify --config "$CONFIG"
 gemma4-sae train --config "$CONFIG"
 gemma4-sae evaluate --config "$CONFIG"
 gemma4-sae fidelity --config "$CONFIG"
+gemma4-sae explain --config "$CONFIG" --text "Paris is the capital of France."
 gemma4-sae mine --config "$CONFIG"
 gemma4-sae publish --config "$CONFIG" --checkpoint latest --dry-run
 ```
@@ -310,6 +314,53 @@ gemma4-sae mine \
   --features 41 928 12007 \
   --top-contexts 40
 ```
+
+### Explain a new prompt
+
+After training, apply the SAE to a new prompt by running Gemma once, capturing the same
+layer-20 residual stream, and encoding each token with the trained dictionary:
+
+```bash
+gemma4-sae explain \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --text "Paris is the capital of France." \
+  --top-features 5 \
+  --top-prompt-features 20 \
+  --output runs/prompt-paris.json
+```
+
+The JSON report includes:
+
+- every token and its position;
+- the number of threshold-active SAE features for that token;
+- the strongest feature IDs and activation strengths per token;
+- the strongest features across the whole prompt and the token positions where they fire;
+- examples already available in `feature_reports/features.json`;
+- an exact suggested `gemma4-sae mine --features ...` command for gathering held-out
+  contexts for the newly observed feature IDs.
+
+For example, a token row has this shape:
+
+```json
+{
+  "position": 1,
+  "token_id": 6044,
+  "token": "Paris",
+  "text": "Paris",
+  "special": false,
+  "active_feature_count": 61,
+  "top_features": [
+    {"feature_id": 12007, "activation": 8.41, "known_contexts": []},
+    {"feature_id": 928, "activation": 6.73, "known_contexts": []}
+  ]
+}
+```
+
+The numbers above illustrate the schema; real IDs and activations come from the trained
+checkpoint. If `known_contexts` is empty, run the report's suggested mining command and
+then rerun `explain`. The prompt is printed and, when `--output` is used, stored verbatim;
+review sensitive inputs before saving or sharing reports.
 
 After reviewing the generated release bundle, model card, metrics, data terms, and any
 mined contexts, upload the inference-only release. The checked-in base and IT
