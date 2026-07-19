@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 
 import gemma4_sae.explain as explain_module
 from gemma4_sae.config import DataConfig, ModelConfig, ProjectConfig, SAEConfig
 from gemma4_sae.label import checkpoint_identity
-from gemma4_sae.provenance import canonical_sha256, training_config_sha256
+from gemma4_sae.provenance import canonical_sha256, file_sha256, training_config_sha256
 from gemma4_sae.sae import BatchTopKSAE
 
 
@@ -183,3 +184,123 @@ def test_explain_prompt_runs_with_pinned_checkpoint(
     )
     assert report["labeled_prompt_feature_fraction"] == 1.0
     assert "--features" in report["suggested_context_mining_command"]
+
+
+def test_explain_prompt_runs_from_verified_release(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+    config = ProjectConfig(
+        model=ModelConfig(),
+        data=DataConfig(),
+        sae=SAEConfig(expansion_factor=2, target_l0=2),
+    )
+    manifest = {
+        "format_version": 1,
+        "d_model": 4,
+        "total_tokens": 3,
+        "shards": [],
+        "metadata": {"model_id": config.model.model_id},
+    }
+    training_sha256 = training_config_sha256(config.to_dict())
+    manifest_sha256 = canonical_sha256(manifest)
+    checkpoint_sha256 = "a" * 64
+    sae = BatchTopKSAE(d_model=4, n_features=8, target_l0=2)
+    sae.update_inference_threshold_(torch.tensor(0.0))
+    tensors = {
+        **{
+            f"sae.{name}": value.detach().cpu().contiguous()
+            for name, value in sae.state_dict().items()
+        },
+        "normalization.activation_mean": torch.zeros(4),
+        "normalization.activation_scale": torch.ones(1),
+    }
+    save_file(tensors, release_dir / "sae_weights.safetensors")
+    json_files = {
+        "resolved_config.json": config.to_dict(),
+        "activation_manifest.json": manifest,
+        "sae_config.json": {
+            "format_version": 1,
+            "architecture": "batchtopk",
+            "d_model": 4,
+            "n_features": 8,
+            "target_l0": 2,
+            "threshold_ema_decay": 0.999,
+            "model_id": config.model.model_id,
+            "model_revision": config.model.revision,
+            "layer_index": config.model.layer_index,
+            "checkpoint_step": 25,
+            "training_config_sha256": training_sha256,
+            "activation_manifest_sha256": manifest_sha256,
+        },
+        "release_metadata.json": {
+            "source_checkpoint_sha256": checkpoint_sha256,
+        },
+        "feature_labels.json": {
+            "format_version": 1,
+            "checkpoint": {
+                "model_id": config.model.model_id,
+                "model_revision": config.model.revision,
+                "layer_index": config.model.layer_index,
+                "checkpoint_step": 25,
+                "checkpoint_sha256": checkpoint_sha256,
+                "training_config_sha256": training_sha256,
+                "activation_manifest_sha256": manifest_sha256,
+                "n_features": 8,
+            },
+            "labels": [
+                {
+                    "feature_id": feature_id,
+                    "status": "candidate",
+                    "interpretation": {
+                        "label": f"released feature {feature_id}",
+                        "description": "Synthetic released label.",
+                        "activation_rule": "Used only in tests.",
+                        "confidence": "low",
+                        "polysemantic": False,
+                        "facets": [],
+                        "caveats": [],
+                    },
+                    "validation": None,
+                }
+                for feature_id in range(8)
+            ],
+        },
+    }
+    for name, value in json_files.items():
+        (release_dir / name).write_text(json.dumps(value), encoding="utf-8")
+    checksums = {
+        path.name: file_sha256(path)
+        for path in release_dir.iterdir()
+        if path.is_file()
+    }
+    (release_dir / "checksums.json").write_text(
+        json.dumps(checksums),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        explain_module,
+        "load_gemma",
+        lambda _config: (FakeTokenizer(), object()),
+    )
+    monkeypatch.setattr(explain_module, "GemmaActivationExtractor", FakeExtractor)
+    report = explain_module.explain_release_prompt(
+        release_dir,
+        "Paris France",
+        backend="cpu",
+        max_tokens=16,
+        top_features_per_token=3,
+        top_prompt_features=4,
+        context_examples=0,
+    )
+
+    assert report["sae_source_kind"] == "huggingface_release"
+    assert report["checkpoint_step"] == 25
+    assert report["checkpoint_sha256"] == checkpoint_sha256
+    assert report["prompt_features"][0]["interpretation"]["label"].startswith(
+        "released feature"
+    )
+    assert report["suggested_context_mining_command"] is None

@@ -120,13 +120,13 @@ For Jupyter:
 
 ```bash
 python -m pip install -e ".[notebook]"
-GEMMA4_SAE_CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml \
-  jupyter lab notebooks/analyze_gemma4_sae.ipynb
+jupyter lab notebooks/analyze_gemma4_sae.ipynb
 ```
 
-Use `configs/e4b_layer20_batchtopk.yaml` instead when analyzing the smaller pilot run.
-Set `GEMMA4_SAE_EXPLANATION=runs/prompt-paris.json` as well to render a saved prompt's
-token-by-feature heatmap.
+Set either `HF_REPO_ID` or `LOCAL_CONFIG_PATH` in the notebook's first code cell. Set
+`EXPLANATION_JSON` there as well to render a saved prompt's token-by-feature heatmap.
+Hub mode downloads and verifies the inference release; analyses requiring unpublished
+activation shards remain clearly unavailable.
 
 For development:
 
@@ -535,6 +535,26 @@ gemma4-sae explain \
   --top-prompt-features 20 \
   --output runs/prompt-paris.json
 ```
+
+After publication, the same operation is portable and does not require the training
+checkpoint, activation cache, or original YAML:
+
+```bash
+python -m pip install "gemma4-sae @ git+https://github.com/lamm-mit/gemma-sae.git"
+
+gemma4-sae explain \
+  --sae-repo lamm-mit/gemma-4-e4b-layer20-batchtopk-sae \
+  --device auto \
+  --text "Paris is the capital of France." \
+  --output prompt-paris.json
+```
+
+`--sae-repo` accepts either a Hugging Face model repository or a local downloaded release
+directory. The loader verifies `checksums.json`, the resolved configuration, activation
+manifest, source-checkpoint identity, and any included feature-label registry before
+inference. Use `--sae-revision <commit>` to pin the Hub artifact, `--local-files-only`
+for an already-cached snapshot, and `--device cuda|mps|cpu|auto` to choose the execution
+backend. The exact released Gemma revision is always retained.
 
 The JSON report includes:
 

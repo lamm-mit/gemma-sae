@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, snapshot_download
 from safetensors.torch import load_file, save_file
 
 from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
@@ -23,6 +23,13 @@ RELEASE_ARTIFACTS = (
     "fidelity.json",
     "run_metadata.json",
     "validation_metrics.json",
+)
+REQUIRED_RELEASE_FILES = (
+    "activation_manifest.json",
+    "release_metadata.json",
+    "resolved_config.json",
+    "sae_config.json",
+    "sae_weights.safetensors",
 )
 
 
@@ -67,6 +74,76 @@ def _write_json(path: Path, value: object) -> None:
         json.dump(value, handle, indent=2, sort_keys=True, ensure_ascii=False)
         handle.write("\n")
     temporary.replace(path)
+
+
+def verify_release_bundle(release_dir: str | Path) -> dict[str, str]:
+    """Verify required files and every content checksum in an inference release."""
+
+    release_dir = Path(release_dir)
+    checksums_path = release_dir / "checksums.json"
+    if not checksums_path.is_file():
+        raise FileNotFoundError(f"Release checksum manifest is missing: {checksums_path}")
+    checksums = _read_json(checksums_path)
+    if not isinstance(checksums, dict) or not all(
+        isinstance(name, str) and isinstance(digest, str)
+        for name, digest in checksums.items()
+    ):
+        raise ValueError("checksums.json must map release filenames to SHA-256 strings.")
+
+    missing = [
+        name
+        for name in REQUIRED_RELEASE_FILES
+        if not (release_dir / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError("Release is missing required files: " + ", ".join(missing))
+
+    required_without_manifest = set(REQUIRED_RELEASE_FILES)
+    missing_checksums = sorted(required_without_manifest - set(checksums))
+    if missing_checksums:
+        raise ValueError(
+            "checksums.json omits required files: " + ", ".join(missing_checksums)
+        )
+
+    for name, expected in checksums.items():
+        if Path(name).name != name:
+            raise ValueError(f"Release checksum entry must be a plain filename: {name!r}")
+        path = release_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(f"Checksummed release file is missing: {path}")
+        observed = file_sha256(path)
+        if observed != expected:
+            raise ValueError(
+                f"Release checksum mismatch for {name}: expected {expected}, got {observed}."
+            )
+    return checksums
+
+
+def resolve_release_bundle(
+    source: str | Path,
+    *,
+    revision: str | None = None,
+    cache_dir: str | Path | None = None,
+    local_files_only: bool = False,
+) -> Path:
+    """Resolve a local release directory or download a verified Hub model snapshot."""
+
+    local_path = Path(source).expanduser()
+    if local_path.is_dir():
+        release_dir = local_path.resolve()
+    else:
+        release_dir = Path(
+            snapshot_download(
+                repo_id=str(source),
+                repo_type="model",
+                revision=revision,
+                cache_dir=str(cache_dir) if cache_dir is not None else None,
+                local_files_only=local_files_only,
+                token=read_hf_token(),
+            )
+        )
+    verify_release_bundle(release_dir)
+    return release_dir
 
 
 def _model_card(
@@ -140,11 +217,24 @@ exact hook convention, revisions, data mixture, normalization, width, L0, and se
 
 ## Loading
 
-```python
-from huggingface_hub import snapshot_download
-from gemma4_sae.release import load_release_bundle
+Explain a new prompt directly from this repository:
 
-folder = snapshot_download("{repo_id}")
+```bash
+gemma4-sae explain \\
+  --sae-repo {repo_id} \\
+  --text "Paris is the capital of France." \\
+  --output prompt-paris.json
+```
+
+The command downloads this verified inference release and the exact base-model revision,
+then runs on CUDA, MPS, or CPU according to `--device` (default: `auto`).
+
+For programmatic loading:
+
+```python
+from gemma4_sae.release import load_release_bundle, resolve_release_bundle
+
+folder = resolve_release_bundle("{repo_id}")
 sae, activation_mean, activation_scale, metadata = load_release_bundle(folder)
 ```
 
@@ -165,8 +255,12 @@ validation metrics; they are not ground-truth concepts.
 def load_release_bundle(
     release_dir: str | Path,
     device: str | torch.device = "cpu",
+    *,
+    verify: bool = True,
 ) -> tuple[BatchTopKSAE, torch.Tensor, torch.Tensor, dict[str, Any]]:
     release_dir = Path(release_dir)
+    if verify:
+        verify_release_bundle(release_dir)
     metadata = _read_json(release_dir / "sae_config.json")
     tensors = load_file(release_dir / "sae_weights.safetensors", device="cpu")
     state = {

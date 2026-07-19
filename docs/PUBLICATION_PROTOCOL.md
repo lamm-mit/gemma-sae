@@ -222,5 +222,24 @@ explicitly opts in after privacy and license review. The label registry is inclu
 present because it omits held-out scorer text; review its descriptions and metadata before
 public release.
 
+After the Hub upload, test the artifact from a clean environment rather than relying on
+the original training directory:
+
+```bash
+gemma4-sae explain \
+  --sae-repo lamm-mit/<released-sae> \
+  --sae-revision <hub-commit-sha> \
+  --device cpu \
+  --text "A frozen release portability test." \
+  --output portability-test.json
+```
+
+The command must verify all release checksums and provenance, load the exact pinned Gemma
+revision, and complete without access to the training checkpoint or activation cache.
+Open the analysis notebook separately, set `HF_REPO_ID` and `HF_REPO_REVISION` in its
+first code cell, and confirm that released metrics, labels, and decoder geometry render.
+Panels requiring activation shards must be marked unavailable rather than recomputed from
+an undocumented corpus.
+
 Use precise language: an SAE is a useful learned decomposition of an activation space,
 not proof that it recovered a unique set of concepts intrinsically used by the model.

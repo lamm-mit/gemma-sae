@@ -122,3 +122,18 @@ def test_unified_cli_has_all_pipeline_commands() -> None:
             )
         namespace = parser.parse_args(arguments)
         assert namespace.command == command
+
+    hub_explain = parser.parse_args(
+        [
+            "explain",
+            "--sae-repo",
+            "lamm-mit/test-sae",
+            "--device",
+            "cpu",
+            "--text",
+            "hello",
+        ]
+    )
+    assert hub_explain.config is None
+    assert hub_explain.sae_repo == "lamm-mit/test-sae"
+    assert hub_explain.device == "cpu"

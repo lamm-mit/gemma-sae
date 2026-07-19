@@ -111,22 +111,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    config = load_config(args.config)
+    config = load_config(args.config) if getattr(args, "config", None) else None
     if args.command == "doctor":
+        assert config is not None
         print(json.dumps(diagnose(config), indent=2))
     elif args.command == "collect":
+        assert config is not None
         collect(config)
     elif args.command == "verify":
+        assert config is not None
         result = verify_activation_store(
             config.data.activation_dir,
             full_hash=not args.headers_only,
         )
         print(result)
     elif args.command == "train":
+        assert config is not None
         train(config, resume=args.resume)
     elif args.command == "evaluate":
+        assert config is not None
         evaluate(config, args.checkpoint, args.max_batches)
     elif args.command == "fidelity":
+        assert config is not None
         fidelity(config, args.checkpoint)
     elif args.command == "explain":
         print(json.dumps(explain_from_args(args), indent=2, ensure_ascii=False))
@@ -135,6 +141,7 @@ def main() -> None:
     elif args.command == "develop-labels":
         develop_from_args(args)
     elif args.command == "mine":
+        assert config is not None
         mine(
             config,
             args.checkpoint,
@@ -145,6 +152,7 @@ def main() -> None:
             max_batches=args.max_batches,
         )
     elif args.command == "publish":
+        assert config is not None
         private = True if args.private else False if args.public else None
         result = publish_release(
             config,

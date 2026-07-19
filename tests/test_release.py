@@ -15,6 +15,8 @@ from gemma4_sae.release import (
     build_release_bundle,
     load_release_bundle,
     publish_release,
+    resolve_release_bundle,
+    verify_release_bundle,
 )
 from gemma4_sae.storage import ActivationShardWriter, load_manifest
 
@@ -109,6 +111,25 @@ def test_release_bundle_is_inference_only_and_hashed(tmp_path: Path, monkeypatch
     assert mean.shape == (4,)
     assert scale.ndim == 0
     assert metadata["model_id"] == config.model.model_id
+    assert resolve_release_bundle(release_dir) == release_dir.resolve()
+
+    download_calls = {}
+
+    def fake_snapshot_download(**kwargs):
+        download_calls.update(kwargs)
+        return str(release_dir)
+
+    monkeypatch.setattr(release_module, "snapshot_download", fake_snapshot_download)
+    assert (
+        resolve_release_bundle("lamm-mit/test-sae", revision="release-commit")
+        == release_dir
+    )
+    assert download_calls["repo_id"] == "lamm-mit/test-sae"
+    assert download_calls["revision"] == "release-commit"
+
+    (release_dir / "sae_config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        verify_release_bundle(release_dir)
 
 
 def test_publish_dry_run_never_calls_hugging_face(tmp_path: Path, monkeypatch) -> None:
