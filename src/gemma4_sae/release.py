@@ -13,6 +13,7 @@ from safetensors.torch import load_file, save_file
 from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
 from .gemma import read_hf_token
+from .label import DEFAULT_REGISTRY_NAME, checkpoint_identity, load_label_registry
 from .provenance import canonical_sha256, file_sha256, runtime_metadata
 from .sae import BatchTopKSAE
 from .storage import load_manifest
@@ -155,7 +156,9 @@ apply the SAE with `use_threshold=True`, then invert the normalization after dec
 A sparse autoencoder is a learned decomposition and may split, merge, duplicate, or omit
 concepts. Reconstruction metrics do not establish semantic interpretability. Validate
 features on held-out data and with causal interventions. Mined text contexts are excluded
-from the default bundle to reduce privacy and licensing risk.
+from the default bundle to reduce privacy and licensing risk. When `feature_labels.json`
+is present, its descriptions are checkpoint-bound hypotheses with recorded automated
+validation metrics; they are not ground-truth concepts.
 """
 
 
@@ -269,6 +272,9 @@ def build_release_bundle(
             "release_runtime": runtime_metadata(),
             "contains_optimizer_state": False,
             "contains_mined_text_contexts": config.publication.include_feature_reports,
+            "contains_feature_labels": (
+                run_dir / DEFAULT_REGISTRY_NAME
+            ).exists(),
         },
     )
 
@@ -294,6 +300,15 @@ def build_release_bundle(
         shutil.copy2(feature_report, release_feature_report)
     elif release_feature_report.exists():
         release_feature_report.unlink()
+
+    label_registry = run_dir / DEFAULT_REGISTRY_NAME
+    release_labels = release_dir / "feature_labels.json"
+    if label_registry.exists():
+        identity = checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
+        load_label_registry(label_registry, identity=identity)
+        shutil.copy2(label_registry, release_labels)
+    elif release_labels.exists():
+        release_labels.unlink()
 
     (release_dir / "README.md").write_text(
         _model_card(config, checkpoint, manifest, metrics, destination),

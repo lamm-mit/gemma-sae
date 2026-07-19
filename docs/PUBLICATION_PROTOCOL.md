@@ -32,7 +32,8 @@ gemma4-sae verify --config <smoke.yaml>
 gemma4-sae train --config <smoke.yaml>
 gemma4-sae evaluate --config <smoke.yaml>
 gemma4-sae fidelity --config <smoke.yaml>
-gemma4-sae mine --config <smoke.yaml>
+gemma4-sae mine --config <smoke.yaml> --top-contexts 20 --random-contexts 20
+gemma4-sae label --config <smoke.yaml> --provider transformers --model "ORG/INSTRUCT-MODEL"
 gemma4-sae publish --config <smoke.yaml> --dry-run
 pytest
 ruff check .
@@ -130,6 +131,24 @@ Feature names are hypotheses. For a sampled and preregistered feature set:
 - test feature specificity, not just sensitivity;
 - inspect token-position, template, language, and formatting confounds.
 
+The checked-in `gemma4-sae label` protocol uses a checkpoint-bound, resumable registry.
+It separates examples used to propose an interpretation from blinded held-out positive
+and zero-activation contexts used for scoring. Record the provider, exact model ID,
+response IDs, prompt/schema hashes, evidence hashes, decision threshold, balanced
+accuracy, activation-rank correlation, and whether the scorer differs from the explainer.
+Do not compare auto-interpretability scores produced by different models or prompt
+protocols as though they were interchangeable.
+
+Retain the immutable local files under `feature_labels/evidence/` for audit and
+reproduction of the exact train/held-out split. They contain source text and therefore
+require the same privacy and license review as mined contexts; the publisher excludes
+them by default.
+
+An `auto_validated` registry status means only that the proposed description passed the
+preregistered held-out thresholds. It does not establish uniqueness, causal relevance, or
+human agreement. Preserve low-scoring and uninterpretable features in the analysis rather
+than silently excluding them.
+
 ## 9. Causal evidence
 
 For claims that a feature contributes to behavior:
@@ -175,6 +194,7 @@ Release:
 - manifests and checksums;
 - checkpoints or a documented reason they cannot be released;
 - aggregate metrics and plotting code;
+- the checkpoint-bound feature-label registry and automated validation metadata;
 - feature reports after privacy review;
 - model/data licenses and attribution;
 - limitations, negative results, and compute statement.
@@ -189,7 +209,9 @@ The dry run reports missing required evidence. After review, publish privately f
 internal validation or pass `--public` for the final `lamm-mit` upload. The publisher
 refuses a real upload without run metadata, validation metrics, held-out SAE evaluation,
 and live-model fidelity. Mined contexts remain excluded unless the configuration
-explicitly opts in after privacy and license review.
+explicitly opts in after privacy and license review. The label registry is included when
+present because it omits held-out scorer text; review its descriptions and metadata before
+public release.
 
 Use precise language: an SAE is a useful learned decomposition of an activation space,
 not proof that it recovered a unique set of concepts intrinsically used by the model.

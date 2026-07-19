@@ -88,6 +88,8 @@ Gemma; training then consumes cached shards without loading Gemma.
   metrics
 - downstream language-model loss recovery from live SAE and mean-ablation interventions
 - automatic or explicit feature selection and top-context mining
+- resumable, checkpoint-bound feature labeling with held-out automatic scoring
+- OpenAI, Anthropic, OpenAI-compatible, and local Transformers labeling backends
 - prompt-level explanations with per-token SAE feature IDs, strengths, and known contexts
 - inference-only `safetensors` release bundles, model cards, and SHA-256 checksums
 - an explicit Hugging Face publisher configured for the `lamm-mit` organization
@@ -206,6 +208,7 @@ gemma4-sae evaluate --config "$CONFIG"
 gemma4-sae fidelity --config "$CONFIG"
 gemma4-sae explain --config "$CONFIG" --text "Paris is the capital of France."
 gemma4-sae mine --config "$CONFIG"
+gemma4-sae label --config "$CONFIG" --provider transformers --model "ORG/INSTRUCT-MODEL"
 gemma4-sae publish --config "$CONFIG" --checkpoint latest --dry-run
 ```
 
@@ -289,6 +292,7 @@ gemma4-sae mine \
   --checkpoint latest \
   --n-features 64 \
   --top-contexts 40 \
+  --random-contexts 40 \
   --max-batches 4096 \
   2>&1 | tee logs/mine.log
 gemma4-sae publish \
@@ -312,8 +316,116 @@ Mine particular feature IDs:
 gemma4-sae mine \
   --config "$CONFIG" \
   --features 41 928 12007 \
-  --top-contexts 40
+  --top-contexts 40 \
+  --random-contexts 40
 ```
+
+### Label mined features once
+
+`mine` collects strong activations, randomly sampled active examples, and
+zero-activation controls. `label` turns that evidence into reusable natural-language
+interpretations and, by default, tests each interpretation on blinded held-out positive
+and negative contexts. The registry is written atomically after every feature:
+
+```text
+runs/.../feature_labels/labels.json
+```
+
+The registry is bound to the exact SAE checkpoint SHA-256, model revision, layer,
+training configuration, and activation manifest. An interrupted invocation is safe to
+rerun: existing labels are skipped unless `--overwrite` is passed.
+
+With OpenAI's Responses API, choose any structured-output-capable model available to the
+API project. The request uses the documented
+[JSON-schema Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+contract:
+
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY
+echo
+export OPENAI_API_KEY
+
+gemma4-sae label \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --provider openai \
+  --model gpt-5.6 \
+  --acknowledge-external-data
+```
+
+With Anthropic, the request uses the documented
+[`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+contract:
+
+```bash
+read -rsp "Anthropic API key: " ANTHROPIC_API_KEY
+echo
+export ANTHROPIC_API_KEY
+
+gemma4-sae label \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --provider anthropic \
+  --model "YOUR-CLAUDE-MODEL-ID" \
+  --acknowledge-external-data
+```
+
+For a Hugging Face causal instruction model running locally on CUDA, MPS, or CPU:
+
+```bash
+gemma4-sae label \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --provider transformers \
+  --model "ORG/INSTRUCT-MODEL" \
+  --device cuda \
+  --dtype bfloat16
+```
+
+For vLLM, LM Studio, or another server implementing OpenAI-compatible chat completions
+and JSON-schema response formats:
+
+```bash
+gemma4-sae label \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --provider openai-compatible \
+  --model "local-model-name" \
+  --base-url http://127.0.0.1:8000/v1
+```
+
+Use a different scorer model to reduce self-evaluation bias:
+
+```bash
+gemma4-sae label \
+  --config "$CONFIG" \
+  --provider openai \
+  --model gpt-5.6 \
+  --scorer-provider anthropic \
+  --scorer-model "YOUR-CLAUDE-MODEL-ID" \
+  --acknowledge-external-data
+```
+
+External backends require `--acknowledge-external-data` because mined dataset text leaves
+the machine. API keys are read only from environment variables and are never written to
+artifacts. Use `--api-key-env` or `--scorer-api-key-env` for non-default variable names.
+Localhost OpenAI-compatible servers and local Transformers do not require the
+acknowledgement.
+
+Each feature receives a status of `candidate`, `auto_validated`, or `uninterpretable`.
+Automatic validation measures held-out balanced accuracy and activation-rank correlation;
+it is not a substitute for human review or causal intervention. `--no-score` explicitly
+creates candidate-only labels. The registry records provider/model identifiers, response
+IDs, token usage,
+prompt/schema hashes, evidence hashes, validation metrics, and thresholds, but does not
+store held-out scorer text. Exact train/held-out splits are preserved separately under
+`feature_labels/evidence/` so the scoring run remains locally reproducible. Those raw-text
+snapshots are intentionally excluded from release bundles.
+
+This is done once **per feature per SAE checkpoint**, not once per prompt. Labeling all
+40,960 features would require substantial mining and roughly two model calls per feature.
+A practical workflow labels 64–500 scientifically interesting features first, then grows
+the same registry incrementally when new prompts reveal useful unlabeled features.
 
 ### Explain a new prompt
 
@@ -337,6 +449,7 @@ The JSON report includes:
 - the strongest feature IDs and activation strengths per token;
 - the strongest features across the whole prompt and the token positions where they fire;
 - examples already available in `feature_reports/features.json`;
+- reusable interpretations and validation metrics from `feature_labels/labels.json`;
 - an exact suggested `gemma4-sae mine --features ...` command for gathering held-out
   contexts for the newly observed feature IDs.
 
@@ -351,7 +464,16 @@ For example, a token row has this shape:
   "special": false,
   "active_feature_count": 61,
   "top_features": [
-    {"feature_id": 12007, "activation": 8.41, "known_contexts": []},
+    {
+      "feature_id": 12007,
+      "activation": 8.41,
+      "known_contexts": [],
+      "interpretation": {
+        "label": "French places and civic geography",
+        "confidence": "medium",
+        "status": "auto_validated"
+      }
+    },
     {"feature_id": 928, "activation": 6.73, "known_contexts": []}
   ]
 }
@@ -359,8 +481,10 @@ For example, a token row has this shape:
 
 The numbers above illustrate the schema; real IDs and activations come from the trained
 checkpoint. If `known_contexts` is empty, run the report's suggested mining command and
-then rerun `explain`. The prompt is printed and, when `--output` is used, stored verbatim;
-review sensitive inputs before saving or sharing reports.
+then run `label`. All later `explain` calls automatically load the compatible registry;
+use `--no-labels` only when raw feature IDs are desired. The prompt is printed and, when
+`--output` is used, stored verbatim; review sensitive inputs before saving or sharing
+reports.
 
 After reviewing the generated release bundle, model card, metrics, data terms, and any
 mined contexts, upload the inference-only release. The checked-in base and IT
@@ -379,7 +503,9 @@ Omitting `--public` respects the safer `publication.private: true` staging defau
 Publishing refuses to proceed unless run metadata, validation metrics, held-out
 evaluation, and live-model fidelity are present. Optimizer state and mined text contexts
 are excluded; contexts can be included only by changing the explicit publication setting
-after privacy and license review. The checked-in configurations also refuse publication
+after privacy and license review. A compatible feature-label registry is included
+automatically without its held-out scorer text. The checked-in configurations also refuse
+publication
 when fewer than 90% of dictionary features activate on the held-out evaluation scan;
 change that explicit threshold only with a documented scientific rationale.
 
@@ -532,6 +658,10 @@ runs/e4b-layer20-batchtopk/
 ├── validation_metrics.json
 ├── evaluation.json
 ├── fidelity.json
+├── feature_labels/
+│   ├── labels.json
+│   └── evidence/
+│       └── feature-00000041.json
 ├── checkpoints/
 │   ├── latest.json
 │   └── step-00050000.pt
@@ -541,6 +671,7 @@ runs/e4b-layer20-batchtopk/
 │       ├── sae_weights.safetensors
 │       ├── sae_config.json
 │       ├── activation_manifest.json
+│       ├── feature_labels.json
 │       └── checksums.json
 └── feature_reports/
     └── features.json
@@ -550,7 +681,10 @@ runs/e4b-layer20-batchtopk/
 token count, shard row counts, and per-file hashes. Checkpoints store the activation
 manifest and project-configuration hashes and refuse to run against a mismatched artifact.
 Release bundles omit the optimizer/RNG checkpoint and retain only inference weights,
-normalization, aggregate evidence, provenance, and checksums.
+normalization, aggregate evidence, provenance, reusable feature labels, and checksums.
+Raw mined contexts remain excluded by default; the label registry contains descriptions,
+provenance, and aggregate validation metrics rather than held-out scorer text. Local
+`feature_labels/evidence/` snapshots are not copied into the release.
 
 ## Reading the metrics
 

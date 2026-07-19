@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
+import random
 from pathlib import Path
 
 import torch
@@ -13,7 +14,7 @@ from .config import ProjectConfig, load_config
 from .devices import select_device
 from .evaluate import build_sae_from_checkpoint
 from .gemma import read_hf_token
-from .provenance import canonical_sha256
+from .provenance import canonical_sha256, file_sha256
 from .storage import iter_activation_batches, load_manifest
 
 
@@ -67,8 +68,11 @@ def mine(
     *,
     n_features: int,
     top_contexts: int,
+    random_contexts: int,
     max_batches: int,
 ) -> Path:
+    if top_contexts < 1 or random_contexts < 0 or max_batches < 1:
+        raise ValueError("Context counts and max_batches must be non-negative and nonzero.")
     device = select_device(config.model.backend)
     checkpoint_path = resolve_checkpoint(config.sae.run_dir, checkpoint_request)
     if checkpoint_path is None:
@@ -96,6 +100,19 @@ def mine(
         feature_id: [] for feature_id in feature_ids
     }
     frequencies = {feature_id: 0 for feature_id in feature_ids}
+    random_active = {feature_id: [] for feature_id in feature_ids}
+    random_negative = {feature_id: [] for feature_id in feature_ids}
+    active_seen = {feature_id: 0 for feature_id in feature_ids}
+    negative_seen = {feature_id: 0 for feature_id in feature_ids}
+    active_rng = {
+        feature_id: random.Random(config.sae.seed + feature_id * 2 + 71)
+        for feature_id in feature_ids
+    }
+    negative_rng = {
+        feature_id: random.Random(config.sae.seed + feature_id * 2 + 72)
+        for feature_id in feature_ids
+    }
+    row_generator = torch.Generator().manual_seed(config.sae.seed + 313)
     examples = 0
     iterator = iter_activation_batches(
         config.data.activation_dir,
@@ -113,6 +130,11 @@ def mine(
         features, _, _ = sae.encode(x, use_threshold=True)
         selected = features[:, feature_ids].float().cpu()
         examples += len(x)
+        sample_size = min(len(x), max(128, random_contexts * 8))
+        sampled_rows = torch.randperm(
+            len(x),
+            generator=row_generator,
+        )[:sample_size].tolist()
 
         for column, feature_id in enumerate(feature_ids):
             values = selected[:, column]
@@ -126,17 +148,49 @@ def mine(
                 elif item[0] > heap[0][0]:
                     heapq.heapreplace(heap, item)
 
+            if random_contexts == 0:
+                continue
+            for row in sampled_rows:
+                value = float(values[row])
+                if value > 0:
+                    active_seen[feature_id] += 1
+                    reservoir = random_active[feature_id]
+                    item = (value, batch.contexts[row].tolist())
+                    replacement = active_rng[feature_id].randrange(active_seen[feature_id])
+                else:
+                    negative_seen[feature_id] += 1
+                    reservoir = random_negative[feature_id]
+                    item = (0.0, batch.contexts[row].tolist())
+                    replacement = negative_rng[feature_id].randrange(
+                        negative_seen[feature_id]
+                    )
+                if len(reservoir) < random_contexts:
+                    reservoir.append(item)
+                elif replacement < random_contexts:
+                    reservoir[replacement] = item
+
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.model_id,
         revision=config.model.revision,
         token=read_hf_token(),
     )
     report = {
+        "format_version": 2,
         "checkpoint": str(checkpoint_path),
-        "config_sha256": canonical_sha256(config.to_dict()),
+        "checkpoint_step": int(checkpoint["step"]),
+        "checkpoint_sha256": file_sha256(checkpoint_path),
+        "training_config_sha256": checkpoint["training_config_sha256"],
         "activation_manifest_sha256": canonical_sha256(manifest),
+        "model_id": config.model.model_id,
+        "model_revision": config.model.revision,
+        "layer_index": config.model.layer_index,
         "activation_split": "validation_shards",
         "examples_scanned": examples,
+        "mining_parameters": {
+            "top_contexts": top_contexts,
+            "random_contexts": random_contexts,
+            "max_batches": max_batches,
+        },
         "features": [],
     }
     for feature_id in feature_ids:
@@ -148,11 +202,29 @@ def mine(
             }
             for activation, token_ids in sorted(heaps[feature_id], reverse=True)
         ]
+        sampled_active_contexts = [
+            {
+                "activation": activation,
+                "text": tokenizer.decode(token_ids, skip_special_tokens=True),
+                "token_ids": token_ids,
+            }
+            for activation, token_ids in random_active[feature_id]
+        ]
+        sampled_negative_contexts = [
+            {
+                "activation": 0.0,
+                "text": tokenizer.decode(token_ids, skip_special_tokens=True),
+                "token_ids": token_ids,
+            }
+            for _, token_ids in random_negative[feature_id]
+        ]
         report["features"].append(
             {
                 "feature_id": feature_id,
                 "activation_frequency": frequencies[feature_id] / max(examples, 1),
                 "top_contexts": contexts,
+                "random_active_contexts": sampled_active_contexts,
+                "negative_contexts": sampled_negative_contexts,
             }
         )
 
@@ -172,6 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--features", type=int, nargs="*", default=None)
     parser.add_argument("--n-features", type=int, default=16)
     parser.add_argument("--top-contexts", type=int, default=20)
+    parser.add_argument("--random-contexts", type=int, default=20)
     parser.add_argument("--max-batches", type=int, default=256)
     return parser.parse_args()
 
@@ -184,6 +257,7 @@ def main() -> None:
         args.features,
         n_features=args.n_features,
         top_contexts=args.top_contexts,
+        random_contexts=args.random_contexts,
         max_batches=args.max_batches,
     )
 

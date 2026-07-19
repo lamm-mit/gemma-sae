@@ -10,6 +10,8 @@ from .evaluate import evaluate
 from .explain import add_explain_arguments
 from .explain import run_from_args as explain_from_args
 from .fidelity import fidelity
+from .label import add_label_arguments
+from .label import run_from_args as label_from_args
 from .mine import mine
 from .release import publish_release
 from .train import train
@@ -67,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_explain_arguments(explain_parser)
 
+    label_parser = subparsers.add_parser(
+        "label",
+        help="Generate and validate reusable labels for mined SAE features.",
+    )
+    add_label_arguments(label_parser)
+
     mine_parser = subparsers.add_parser(
         "mine",
         help="Mine top activating token contexts.",
@@ -76,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     mine_parser.add_argument("--features", type=int, nargs="*", default=None)
     mine_parser.add_argument("--n-features", type=int, default=16)
     mine_parser.add_argument("--top-contexts", type=int, default=20)
+    mine_parser.add_argument("--random-contexts", type=int, default=20)
     mine_parser.add_argument("--max-batches", type=int, default=256)
 
     publish_parser = subparsers.add_parser(
@@ -113,6 +122,8 @@ def main() -> None:
         fidelity(config, args.checkpoint)
     elif args.command == "explain":
         print(json.dumps(explain_from_args(args), indent=2, ensure_ascii=False))
+    elif args.command == "label":
+        label_from_args(args)
     elif args.command == "mine":
         mine(
             config,
@@ -120,6 +131,7 @@ def main() -> None:
             args.features,
             n_features=args.n_features,
             top_contexts=args.top_contexts,
+            random_contexts=args.random_contexts,
             max_batches=args.max_batches,
         )
     elif args.command == "publish":

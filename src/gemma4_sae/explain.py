@@ -14,6 +14,13 @@ from .config import ProjectConfig, load_config
 from .devices import select_device
 from .evaluate import build_sae_from_checkpoint
 from .gemma import GemmaActivationExtractor, load_gemma
+from .label import (
+    DEFAULT_REGISTRY_NAME,
+    checkpoint_identity,
+    label_lookup,
+    load_label_registry,
+    validate_feature_report,
+)
 from .provenance import canonical_sha256
 from .storage import load_manifest
 
@@ -103,12 +110,17 @@ def summarize_prompt_features(
     return token_rows, prompt_rows
 
 
-def _context_examples(run_dir: Path, limit: int) -> dict[int, list[dict[str, Any]]]:
+def _context_examples(
+    run_dir: Path,
+    limit: int,
+    identity: dict[str, Any],
+) -> dict[int, list[dict[str, Any]]]:
     report_path = run_dir / "feature_reports" / "features.json"
     if limit == 0 or not report_path.exists():
         return {}
     with report_path.open(encoding="utf-8") as handle:
         report = json.load(handle)
+    validate_feature_report(report, identity)
     return {
         int(feature["feature_id"]): [
             {
@@ -133,6 +145,46 @@ def _attach_contexts(
             feature["known_contexts"] = contexts.get(feature["feature_id"], [])
 
 
+def _load_interpretations(
+    config: ProjectConfig,
+    identity: dict[str, Any],
+    requested: str | None,
+) -> tuple[dict[int, dict[str, Any]], str | None]:
+    if requested is None:
+        return {}, None
+    path = (
+        Path(config.sae.run_dir) / DEFAULT_REGISTRY_NAME
+        if requested == "auto"
+        else Path(requested)
+    )
+    if not path.exists() and requested == "auto":
+        return {}, None
+    if not path.exists():
+        raise FileNotFoundError(path)
+    registry = load_label_registry(path, identity=identity)
+    interpretations = {
+        feature_id: {
+            **record["interpretation"],
+            "status": record["status"],
+            "validation": record.get("validation"),
+        }
+        for feature_id, record in label_lookup(registry).items()
+    }
+    return interpretations, str(path)
+
+
+def _attach_interpretations(
+    token_rows: list[dict[str, Any]],
+    prompt_rows: list[dict[str, Any]],
+    interpretations: dict[int, dict[str, Any]],
+) -> None:
+    for feature in prompt_rows:
+        feature["interpretation"] = interpretations.get(feature["feature_id"])
+    for token in token_rows:
+        for feature in token["top_features"]:
+            feature["interpretation"] = interpretations.get(feature["feature_id"])
+
+
 @torch.inference_mode()
 def explain_prompt(
     config: ProjectConfig,
@@ -144,6 +196,7 @@ def explain_prompt(
     top_features_per_token: int,
     top_prompt_features: int,
     context_examples: int,
+    label_registry: str | None = "auto",
 ) -> dict[str, Any]:
     if not text.strip():
         raise ValueError("Prompt text must not be empty.")
@@ -158,6 +211,7 @@ def explain_prompt(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     manifest = load_manifest(config.data.activation_dir)
     validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
+    identity = checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
 
     tokenizer, model = load_gemma(config.model)
     encoded = tokenizer(
@@ -187,18 +241,27 @@ def explain_prompt(
     )
 
     run_dir = Path(config.sae.run_dir)
-    contexts = _context_examples(run_dir, context_examples)
+    contexts = _context_examples(run_dir, context_examples, identity)
     _attach_contexts(token_rows, prompt_rows, contexts)
+    interpretations, labels_source = _load_interpretations(
+        config,
+        identity,
+        label_registry,
+    )
+    _attach_interpretations(token_rows, prompt_rows, interpretations)
     feature_ids = [row["feature_id"] for row in prompt_rows]
     mine_command = (
         f"gemma4-sae mine --config {config_label} --checkpoint {checkpoint_request} "
         f"--features {' '.join(str(feature_id) for feature_id in feature_ids)} "
-        "--top-contexts 40 --max-batches 4096"
+        "--top-contexts 40 --random-contexts 40 --max-batches 4096"
         if feature_ids
         else None
     )
 
     token_l0 = [row["active_feature_count"] for row in token_rows]
+    labeled_prompt_features = sum(
+        row["interpretation"] is not None for row in prompt_rows
+    )
     return {
         "format_version": 1,
         "model_id": config.model.model_id,
@@ -215,6 +278,10 @@ def explain_prompt(
         "inference_threshold": float(sae.inference_threshold),
         "tokens": token_rows,
         "prompt_features": prompt_rows,
+        "feature_label_registry": labels_source,
+        "labeled_prompt_feature_fraction": (
+            labeled_prompt_features / len(prompt_rows) if prompt_rows else 0.0
+        ),
         "context_examples_source": (
             str(run_dir / "feature_reports" / "features.json") if contexts else None
         ),
@@ -237,6 +304,18 @@ def add_explain_arguments(parser: argparse.ArgumentParser) -> None:
         default=3,
         help="Attach examples already present in feature_reports/features.json.",
     )
+    parser.add_argument(
+        "--labels",
+        default="auto",
+        help="Feature-label registry path, or auto for the run registry.",
+    )
+    parser.add_argument(
+        "--no-labels",
+        dest="labels",
+        action="store_const",
+        const=None,
+        help="Do not load reusable feature labels.",
+    )
     parser.add_argument("--output", help="Optional JSON output path; prompt text is included.")
 
 
@@ -253,6 +332,7 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         top_features_per_token=args.top_features,
         top_prompt_features=args.top_prompt_features,
         context_examples=args.context_examples,
+        label_registry=args.labels,
     )
     if args.output:
         destination = Path(args.output)

@@ -7,6 +7,7 @@ import torch
 
 import gemma4_sae.explain as explain_module
 from gemma4_sae.config import DataConfig, ModelConfig, ProjectConfig, SAEConfig
+from gemma4_sae.label import checkpoint_identity
 from gemma4_sae.provenance import canonical_sha256, training_config_sha256
 from gemma4_sae.sae import BatchTopKSAE
 
@@ -118,6 +119,35 @@ def test_explain_prompt_runs_with_pinned_checkpoint(
     }
     checkpoint_path = run_dir / "checkpoint.pt"
     torch.save(checkpoint, checkpoint_path)
+    labels_dir = run_dir / "feature_labels"
+    labels_dir.mkdir()
+    identity = checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
+    (labels_dir / "labels.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "checkpoint": identity,
+                "labels": [
+                    {
+                        "feature_id": feature_id,
+                        "status": "candidate",
+                        "interpretation": {
+                            "label": f"synthetic feature {feature_id}",
+                            "description": "Synthetic test label.",
+                            "activation_rule": "Used only in tests.",
+                            "confidence": "low",
+                            "polysemantic": False,
+                            "facets": [],
+                            "caveats": [],
+                        },
+                        "validation": None,
+                    }
+                    for feature_id in range(8)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
         explain_module,
@@ -147,4 +177,9 @@ def test_explain_prompt_runs_with_pinned_checkpoint(
     assert report["token_count"] == 3
     assert report["tokens"][1]["text"] == "Paris"
     assert report["prompt_features"]
+    assert report["feature_label_registry"].endswith("feature_labels/labels.json")
+    assert report["prompt_features"][0]["interpretation"]["label"].startswith(
+        "synthetic feature"
+    )
+    assert report["labeled_prompt_feature_fraction"] == 1.0
     assert "--features" in report["suggested_context_mining_command"]

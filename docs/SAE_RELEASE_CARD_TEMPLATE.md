@@ -78,6 +78,13 @@ Attach the complete reconstruction–sparsity frontier.
 - Number of features reviewed:
 - Held-out top-context protocol:
 - Negative-context protocol:
+- Label explainer provider/model:
+- Independent scorer provider/model:
+- Label prompt/schema hashes:
+- Automatically validated / candidate / uninterpretable counts:
+- Held-out balanced-accuracy distribution:
+- Activation-prediction rank-correlation distribution:
+- Human review protocol and inter-rater agreement:
 - Human rubric and inter-rater agreement:
 - Automated evaluator and prompt, if used:
 - Cross-seed stability:

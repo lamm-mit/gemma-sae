@@ -57,6 +57,7 @@ def test_unified_cli_has_all_pipeline_commands() -> None:
         "train",
         "evaluate",
         "explain",
+        "label",
         "fidelity",
         "mine",
         "publish",
@@ -64,5 +65,7 @@ def test_unified_cli_has_all_pipeline_commands() -> None:
         arguments = [command, "--config", "config.yaml"]
         if command == "explain":
             arguments.extend(["--text", "hello"])
+        if command == "label":
+            arguments.extend(["--provider", "transformers", "--model", "test/model"])
         namespace = parser.parse_args(arguments)
         assert namespace.command == command

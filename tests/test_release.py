@@ -8,13 +8,15 @@ from safetensors import safe_open
 
 import gemma4_sae.release as release_module
 import gemma4_sae.train as train_module
+from gemma4_sae.checkpoint import resolve_checkpoint
 from gemma4_sae.config import DataConfig, ModelConfig, ProjectConfig, SAEConfig
+from gemma4_sae.label import checkpoint_identity
 from gemma4_sae.release import (
     build_release_bundle,
     load_release_bundle,
     publish_release,
 )
-from gemma4_sae.storage import ActivationShardWriter
+from gemma4_sae.storage import ActivationShardWriter, load_manifest
 
 
 def _trained_tiny_config(tmp_path: Path, monkeypatch) -> ProjectConfig:
@@ -68,10 +70,32 @@ def _trained_tiny_config(tmp_path: Path, monkeypatch) -> ProjectConfig:
 
 def test_release_bundle_is_inference_only_and_hashed(tmp_path: Path, monkeypatch) -> None:
     config = _trained_tiny_config(tmp_path, monkeypatch)
+    checkpoint_path = resolve_checkpoint(config.sae.run_dir, "latest")
+    assert checkpoint_path is not None
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    manifest = load_manifest(config.data.activation_dir)
+    labels_path = Path(config.sae.run_dir) / "feature_labels" / "labels.json"
+    labels_path.parent.mkdir()
+    labels_path.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "checkpoint": checkpoint_identity(
+                    config,
+                    checkpoint,
+                    checkpoint_path,
+                    manifest,
+                ),
+                "labels": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     release_dir = build_release_bundle(config)
 
     assert (release_dir / "sae_weights.safetensors").exists()
     assert (release_dir / "README.md").exists()
+    assert (release_dir / "feature_labels.json").exists()
     assert not (release_dir / "feature_reports.json").exists()
     with safe_open(release_dir / "sae_weights.safetensors", framework="pt") as handle:
         keys = set(handle.keys())
