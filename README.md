@@ -127,8 +127,10 @@ The notebook's first code cell defaults to
 `HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` and therefore loads the
 verified inference release directly from Hugging Face. Set `HF_REPO_ID = ""` to use
 `LOCAL_CONFIG_PATH` for a local training run. Set `EXPLANATION_JSON` there as well to
-render a saved prompt's token-by-feature heatmap. Analyses requiring unpublished
-activation shards remain clearly unavailable in Hub mode.
+render a saved prompt's token-by-feature heatmap. `DEVICE = "auto"` selects CUDA, then
+Apple MPS, then CPU; set it explicitly to `cuda`, `mps`, or `cpu` to require that
+backend. `ANALYSIS_BATCH_SIZE` controls local activation-analysis memory. Analyses
+requiring unpublished activation shards remain clearly unavailable in Hub mode.
 
 For development:
 
