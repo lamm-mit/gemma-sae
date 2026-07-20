@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -30,6 +31,16 @@ REQUIRED_RELEASE_FILES = (
     "resolved_config.json",
     "sae_config.json",
     "sae_weights.safetensors",
+)
+EXAMPLE_EXPLANATION_NAME = "example_explanation.json"
+EXPLANATION_IDENTITY_FIELDS = (
+    "model_id",
+    "model_revision",
+    "layer_index",
+    "checkpoint_step",
+    "checkpoint_sha256",
+    "training_config_sha256",
+    "activation_manifest_sha256",
 )
 
 
@@ -74,6 +85,40 @@ def _write_json(path: Path, value: object) -> None:
         json.dump(value, handle, indent=2, sort_keys=True, ensure_ascii=False)
         handle.write("\n")
     temporary.replace(path)
+
+
+def validate_example_explanation(
+    report: dict[str, Any],
+    *,
+    identity: dict[str, Any],
+) -> None:
+    """Validate a portable prompt report against its source SAE checkpoint."""
+
+    if report.get("format_version") != 1:
+        raise ValueError(
+            "Example explanation has an unsupported format_version; rerun "
+            "`gemma4-sae explain` with the current package."
+        )
+    mismatches = [
+        field
+        for field in EXPLANATION_IDENTITY_FIELDS
+        if report.get(field) != identity.get(field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "Example explanation belongs to a different SAE checkpoint: "
+            + ", ".join(mismatches)
+        )
+    prompt = report.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("Example explanation must contain a non-empty prompt.")
+    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    if report.get("prompt_sha256") != prompt_sha256:
+        raise ValueError("Example explanation prompt_sha256 does not match its prompt.")
+    if not isinstance(report.get("tokens"), list):
+        raise ValueError("Example explanation tokens must be a list.")
+    if not isinstance(report.get("prompt_features"), list):
+        raise ValueError("Example explanation prompt_features must be a list.")
 
 
 def verify_release_bundle(release_dir: str | Path) -> dict[str, str]:
@@ -159,6 +204,13 @@ def _model_card(
     evaluation = evaluation_report.get("metrics", evaluation_report)
     fidelity = fidelity_report.get("metrics", fidelity_report)
     validation = metrics.get("validation_metrics.json", {})
+    example_note = (
+        "\nA checksummed `example_explanation.json` is included for reproducing the "
+        "notebook's prompt-level tables and figures without the original machine. It "
+        "contains the example prompt text and checkpoint-bound feature activations.\n"
+        if config.publication.example_explanation_path is not None
+        else ""
+    )
     return f"""---
 library_name: gemma4-sae
 base_model: {config.model.model_id}
@@ -214,6 +266,7 @@ not guaranteed uniquely true concepts.
 Consult `resolved_config.json`, `activation_manifest.json`, `run_metadata.json`, and
 `checksums.json` before comparing this SAE with another release. Results are tied to the
 exact hook convention, revisions, data mixture, normalization, width, L0, and seed.
+{example_note}
 
 ## Loading
 
@@ -297,6 +350,31 @@ def build_release_bundle(
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     manifest = load_manifest(config.data.activation_dir)
     validate_checkpoint_provenance(checkpoint, config.to_dict(), manifest)
+    example_explanation_source = (
+        Path(config.publication.example_explanation_path).expanduser()
+        if config.publication.example_explanation_path is not None
+        else None
+    )
+    label_registry = run_dir / DEFAULT_REGISTRY_NAME
+    identity = (
+        checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
+        if label_registry.exists() or example_explanation_source is not None
+        else None
+    )
+    if label_registry.exists():
+        assert identity is not None
+        load_label_registry(label_registry, identity=identity)
+    if example_explanation_source is not None:
+        if not example_explanation_source.is_file():
+            raise FileNotFoundError(
+                "Publication requests an example explanation, but it does not exist: "
+                f"{example_explanation_source}"
+            )
+        assert identity is not None
+        example_report = _read_json(example_explanation_source)
+        if not isinstance(example_report, dict):
+            raise ValueError("Example explanation must be a JSON object.")
+        validate_example_explanation(example_report, identity=identity)
 
     step = int(checkpoint["step"])
     destination = repo_id or config.publication.hf_repo_id
@@ -361,7 +439,11 @@ def build_release_bundle(
         release_dir / "release_metadata.json",
         {
             "source_checkpoint": f"checkpoints/{checkpoint_path.name}",
-            "source_checkpoint_sha256": file_sha256(checkpoint_path),
+            "source_checkpoint_sha256": (
+                identity["checkpoint_sha256"]
+                if identity is not None
+                else file_sha256(checkpoint_path)
+            ),
             "hf_repo_id": destination,
             "release_runtime": runtime_metadata(),
             "contains_optimizer_state": False,
@@ -369,6 +451,7 @@ def build_release_bundle(
             "contains_feature_labels": (
                 run_dir / DEFAULT_REGISTRY_NAME
             ).exists(),
+            "contains_example_explanation": example_explanation_source is not None,
         },
     )
 
@@ -395,14 +478,17 @@ def build_release_bundle(
     elif release_feature_report.exists():
         release_feature_report.unlink()
 
-    label_registry = run_dir / DEFAULT_REGISTRY_NAME
     release_labels = release_dir / "feature_labels.json"
     if label_registry.exists():
-        identity = checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
-        load_label_registry(label_registry, identity=identity)
         shutil.copy2(label_registry, release_labels)
     elif release_labels.exists():
         release_labels.unlink()
+
+    release_example = release_dir / EXAMPLE_EXPLANATION_NAME
+    if example_explanation_source is not None:
+        shutil.copy2(example_explanation_source, release_example)
+    elif release_example.exists():
+        release_example.unlink()
 
     (release_dir / "README.md").write_text(
         _model_card(config, checkpoint, manifest, metrics, destination),

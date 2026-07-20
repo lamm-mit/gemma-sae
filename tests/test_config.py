@@ -46,6 +46,24 @@ def test_dgx_spark_config_is_full_scale_cuda_run() -> None:
     assert config.evaluation.max_sequences == 256
 
 
+def test_selected_12x_config_publishes_portable_example() -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "configs"
+        / "e4b_layer20_batchtopk_dgx_spark_12x_l064.yaml"
+    )
+    config = load_config(path)
+    assert config.sae.expansion_factor == 12
+    assert (
+        config.publication.hf_repo_id
+        == "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
+    )
+    assert (
+        config.publication.example_explanation_path
+        == "runs/hub-smoke-test-12x.json"
+    )
+
+
 def test_unknown_configuration_key_fails(tmp_path: Path) -> None:
     path = tmp_path / "bad.yaml"
     path.write_text(

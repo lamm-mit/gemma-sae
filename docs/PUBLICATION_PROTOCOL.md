@@ -153,6 +153,13 @@ reproduction of the exact train/held-out split. They contain source text and the
 require the same privacy and license review as mined contexts; the publisher excludes
 them by default.
 
+For portable notebook demonstrations, a release may opt in to one
+`example_explanation.json`. Review its prompt text for disclosure, privacy, and licensing
+before publication. The publisher must verify that its model revision, layer, checkpoint,
+training configuration, activation manifest, and prompt hash match the release. Treat
+this fixed example as a reproducibility fixture, not independent evidence of feature
+quality.
+
 An `auto_validated` registry status means only that the proposed description passed the
 preregistered held-out thresholds. It does not establish uniqueness, causal relevance, or
 human agreement. Preserve low-scoring and uninterpretable features in the analysis rather

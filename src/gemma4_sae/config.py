@@ -85,6 +85,7 @@ class PublicationConfig:
     hf_repo_id: str = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
     private: bool = True
     include_feature_reports: bool = False
+    example_explanation_path: str | None = None
     min_active_feature_fraction: float = 0.9
 
 
@@ -153,6 +154,13 @@ class ProjectConfig:
         repo_parts = self.publication.hf_repo_id.split("/")
         if len(repo_parts) != 2 or not all(repo_parts):
             raise ValueError("publication.hf_repo_id must have the form owner/repository.")
+        if (
+            self.publication.example_explanation_path is not None
+            and not self.publication.example_explanation_path.strip()
+        ):
+            raise ValueError(
+                "publication.example_explanation_path must be null or a non-empty path."
+            )
         if not 0 <= self.publication.min_active_feature_fraction <= 1:
             raise ValueError("publication.min_active_feature_fraction must be in [0, 1].")
 

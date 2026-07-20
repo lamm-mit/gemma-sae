@@ -62,7 +62,8 @@ evaluation:
   batch_size: 1
 
 publication:
-  hf_repo_id: lamm-mit/gemma-4-e4b-layer20-batchtopk-sae-12x-l064
+  hf_repo_id: lamm-mit/gemma-4-e4b-layer20-batchtopk-sae
   private: true
   include_feature_reports: false
+  example_explanation_path: runs/hub-smoke-test-12x.json
   min_active_feature_fraction: 0.9

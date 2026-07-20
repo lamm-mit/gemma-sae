@@ -7,12 +7,15 @@
 A reproducible, single-node pipeline for training sparse autoencoders on the residual
 stream of **Gemma 4 E4B**.
 
-All expensive or state-changing work runs through the tested command-line interface.
-The [analysis notebook](notebooks/analyze_gemma4_sae.ipynb) is deliberately read-only:
-it turns completed artifacts into publication figures without loading Gemma, starting
-training, or uploading anything. The project separates data collection, SAE
-optimization, evaluation, downstream intervention, feature mining, and release so every
-artifact is auditable and SAE optimization is exactly resumable from checkpoints.
+All training and publication work runs through the tested command-line interface.
+The [publication analysis notebook](notebooks/analyze_gemma4_sae.ipynb) is deliberately
+read-only: it turns completed artifacts into publication figures without loading Gemma,
+starting training, or uploading anything. The separate
+[Hub prompt feature dashboard](notebooks/hub_prompt_feature_dashboard.ipynb) downloads
+the verified SAE release and exact Gemma revision, accepts new prompts, and visualizes
+their live layer-20 features. The project separates data collection, SAE optimization,
+evaluation, downstream intervention, feature mining, and release so every artifact is
+auditable and SAE optimization is exactly resumable from checkpoints.
 
 No pretrained SAE is bundled with this source repository. A defensible Gemma 4 SAE
 requires a real activation collection and training run; the release command packages and
@@ -92,6 +95,8 @@ Gemma; training then consumes cached shards without loading Gemma.
 - resumable, checkpoint-bound feature labeling with held-out automatic scoring
 - OpenAI, Anthropic, OpenAI-compatible, and local Transformers labeling backends
 - prompt-level explanations with per-token SAE feature IDs, strengths, and known contexts
+- a Hub-first interactive prompt dashboard with full token-feature heatmaps,
+  reconstruction diagnostics, feature cards, label evidence, and decoder geometry
 - inference-only `safetensors` release bundles, model cards, and SHA-256 checksums
 - an explicit Hugging Face publisher configured for the `lamm-mit` organization
 - checkpoint/config/activation compatibility checks before resume or evaluation
@@ -121,16 +126,69 @@ For Jupyter:
 ```bash
 python -m pip install -e ".[notebook]"
 jupyter lab notebooks/analyze_gemma4_sae.ipynb
+# or, for live new-prompt exploration:
+jupyter lab notebooks/hub_prompt_feature_dashboard.ipynb
 ```
 
-The notebook's first code cell defaults to
-`HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` and therefore loads the
-verified inference release directly from Hugging Face. Set `HF_REPO_ID = ""` to use
-`LOCAL_CONFIG_PATH` for a local training run. Set `EXPLANATION_JSON` there as well to
-render a saved prompt's token-by-feature heatmap. `DEVICE = "auto"` selects CUDA, then
-Apple MPS, then CPU; set it explicitly to `cuda`, `mps`, or `cpu` to require that
-backend. `ANALYSIS_BATCH_SIZE` controls local activation-analysis memory. Analyses
-requiring unpublished activation shards remain clearly unavailable in Hub mode.
+The publication notebook keeps every repository, revision, cache option, local path,
+device, and analysis limit in its first code cell. It does not use environment variables
+for notebook configuration and does not infer one source from whether another field is
+empty. The defaults are explicit:
+
+```python
+REPOSITORY_ROOT = "."
+SOURCE_MODE = "huggingface"
+HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
+HF_REPO_REVISION = None
+HF_CACHE_DIR = None
+HF_LOCAL_FILES_ONLY = False
+LOCAL_CONFIG_PATH = "configs/e4b_layer20_batchtopk_dgx_spark_12x_l064.yaml"
+EXPLANATION_BASE = "release"
+EXPLANATION_JSON = "example_explanation.json"
+DEVICE = "auto"
+```
+
+Set `SOURCE_MODE = "local"` to use `LOCAL_CONFIG_PATH`. Set
+`EXPLANATION_BASE = "repository"` and give `EXPLANATION_JSON` a repository-relative or
+absolute filename to inspect another report. There is no automatic fallback to a smoke
+test or another path. `DEVICE = "auto"` selects CUDA, then Apple MPS, then CPU;
+`ANALYSIS_BATCH_SIZE` controls local activation-analysis memory. Analyses requiring
+unpublished activation shards remain clearly unavailable in Hub mode.
+
+### Interactive Hub prompt feature dashboard
+
+[`notebooks/hub_prompt_feature_dashboard.ipynb`](notebooks/hub_prompt_feature_dashboard.ipynb)
+is a completely separate live-inference notebook. Its first code cell contains:
+
+```python
+SAE_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
+SAE_REPO_REVISION = None  # use a commit SHA for a frozen analysis
+DEVICE = "auto"           # CUDA, then MPS, then CPU
+```
+
+It downloads and checksum-verifies the SAE bundle, labels, metrics, and example report,
+then downloads the exact gated Gemma revision recorded in the release. Enter a prompt in
+the notebook text box and click **Analyze prompt**. The model remains loaded for
+subsequent prompts.
+
+The dashboard provides:
+
+- prompt sparsity and per-token reconstruction fidelity;
+- ranked feature hypotheses with label status and held-out validation scores;
+- an activation-normalized token-by-feature heatmap;
+- a selected-feature token highlighter and activation trace;
+- decoder-direction cosine similarities among the strongest prompt features;
+- a compact, privacy-reviewable JSON export.
+
+The design follows the feature-visualization workflow used in Anthropic's
+[Towards Monosemanticity](https://transformer-circuits.pub/2023/monosemantic-features/index.html)
+while keeping the scientific boundary explicit: these are one-layer SAE activations, not
+the causal attribution graphs from Anthropic's later
+[circuit-tracing work](https://www.anthropic.com/research/open-source-circuit-tracing).
+Gemma is gated; accept its Hugging Face terms and authenticate with
+`notebook_login()` or a cached read token. Live inference requires enough memory for the
+base model. CUDA is fastest; MPS and CPU are supported but can be slow and
+memory-intensive.
 
 For development:
 
@@ -635,8 +693,10 @@ Publishing refuses to proceed unless run metadata, validation metrics, held-out
 evaluation, and live-model fidelity are present. Optimizer state and mined text contexts
 are excluded; contexts can be included only by changing the explicit publication setting
 after privacy and license review. A compatible feature-label registry is included
-automatically without its held-out scorer text. The checked-in configurations also refuse
-publication
+automatically without its held-out scorer text. A configuration may explicitly include
+one checkpoint-validated example explanation for portable notebook figures; its prompt
+text is disclosed in the model repository and covered by the release checksums. The
+checked-in configurations also refuse publication
 when fewer than 90% of dictionary features activate on the held-out evaluation scan;
 change that explicit threshold only with a documented scientific rationale.
 
@@ -837,6 +897,26 @@ print("Configured release gates passed.")
 PY
 ```
 
+Create the harmless, portable example explanation before packaging. The selected 12×
+configuration explicitly includes this file in the release. If the Hub smoke test has
+already created it, the command reuses that compatible report; otherwise it runs the
+local checkpoint once:
+
+```bash
+test -f runs/hub-smoke-test-12x.json || gemma4-sae explain \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --device cuda \
+  --text "A catalyst lowers the activation energy without changing the reaction equilibrium." \
+  --top-features 5 \
+  --top-prompt-features 20 \
+  --output runs/hub-smoke-test-12x.json
+```
+
+Only publish example prompts that are safe to disclose. The publisher verifies the
+report's checkpoint, model revision, layer, training configuration, activation manifest,
+and prompt hash before copying it to the release as `example_explanation.json`.
+
 Build the inference-only release without making a network change. The dry run writes the
 local bundle, computes checksums, and reports missing evidence or failed quality gates:
 
@@ -847,7 +927,7 @@ gemma4-sae publish \
   --repo-id "$HF_REPO_ID" \
   --public \
   --dry-run \
-  2>&1 | tee logs/publish-dry-run-12x.json
+  | tee logs/publish-dry-run-12x.json
 
 python - <<'PY'
 import json
@@ -874,17 +954,21 @@ checksums = verify_release_bundle(release)
 sae = json.loads((release / "sae_config.json").read_text())
 metadata = json.loads((release / "release_metadata.json").read_text())
 labels = json.loads((release / "feature_labels.json").read_text())["labels"]
+example = json.loads((release / "example_explanation.json").read_text())
 
 assert sae["n_features"] == 30_720
 assert sae["checkpoint_step"] == 25_000
 assert metadata["hf_repo_id"] == os.environ["HF_REPO_ID"]
 assert metadata["contains_feature_labels"] is True
+assert metadata["contains_example_explanation"] is True
 assert len(labels) >= 64
+assert example["checkpoint_sha256"] == metadata["source_checkpoint_sha256"]
 
 print("Verified files:", len(checksums))
 print("Features:", sae["n_features"])
 print("Checkpoint step:", sae["checkpoint_step"])
 print("Included labels:", len(labels))
+print("Example prompt:", example["prompt"])
 PY
 ```
 
@@ -948,14 +1032,17 @@ release = resolve_release_bundle(
 checksums = verify_release_bundle(release)
 sae = json.loads((release / "sae_config.json").read_text())
 labels = json.loads((release / "feature_labels.json").read_text())["labels"]
+example = json.loads((release / "example_explanation.json").read_text())
 
 assert sae["n_features"] == 30_720
 assert sae["checkpoint_step"] == 25_000
 assert len(labels) >= 64
+assert example["checkpoint_step"] == 25_000
 
 print("Verified Hub snapshot:", release)
 print("Verified files:", len(checksums))
 print("Included labels:", len(labels))
+print("Example prompt:", example["prompt"])
 PY
 ```
 
@@ -992,6 +1079,68 @@ for feature in report["prompt_features"][:10]:
 PY
 ```
 
+For the selected 12× release, the catalyst prompt produced this representative output:
+
+```text
+Model: google/gemma-4-E4B
+Layer: 20
+Mean prompt L0: 141.0
+Labeled prompt-feature fraction: 0.45
+18728 36.674 Final period ending a declarative passage
+5101 30.818 Tokens within a clause's post-verbal predicate or complement span
+26757 30.359 Common-noun tokens
+21172 25.468 unlabeled
+15855 21.833 Tokens in formal STEM expository prose
+26060 19.507 Scientific and technical explanatory prose
+```
+
+The 0.45 label fraction means that 9 of the 20 strongest prompt-level features have
+entries in the released 64-feature label registry. This is substantial enrichment because
+64 labels cover only about 0.21% of the 30,720-feature dictionary. `unlabeled` means the
+feature activated normally but was not among those 64 selected features; it is not an SAE
+error. Important newly observed features can be mined and added to the same
+checkpoint-bound registry later without retraining the SAE.
+
+The prompt mean L0 of 141 is higher than the held-out FineWeb mean of about 64.15.
+BatchTopK controls a batch average during training, whereas portable inference applies
+one learned global threshold. Individual tokens and short or domain-specific prompts can
+therefore activate more or fewer features. Inspect the token-level distribution before
+interpreting a single prompt-level mean:
+
+```bash
+python - <<'PY'
+import json
+import statistics
+from pathlib import Path
+
+report = json.loads(
+    Path("runs/hub-smoke-test-12x.json").read_text()
+)
+rows = report["tokens"]
+ordinary = [row for row in rows if not row["special"]]
+
+print("Inference threshold:", report["inference_threshold"])
+print("All-token mean:", report["mean_inference_l0"])
+print(
+    "Non-special mean:",
+    statistics.mean(row["active_feature_count"] for row in ordinary),
+)
+print(
+    "Non-special median:",
+    statistics.median(row["active_feature_count"] for row in ordinary),
+)
+
+print("\nPer-token L0:")
+for row in rows:
+    print(
+        f'{row["position"]:3d}',
+        f'L0={row["active_feature_count"]:4d}',
+        repr(row["text"]),
+        "special" if row["special"] else "",
+    )
+PY
+```
+
 On any CUDA, Apple Silicon, or CPU analysis machine, install the package and open the
 notebook:
 
@@ -1007,10 +1156,34 @@ jupyter lab notebooks/analyze_gemma4_sae.ipynb
 The notebook already sets
 `HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` inside its first code cell.
 For a frozen paper analysis, paste the saved commit SHA into `HF_REPO_REVISION` in that
-same cell. Leave `DEVICE = "auto"` to select CUDA, then MPS, then CPU. The Hub bundle is
-sufficient for prompt explanations, released metrics, label analysis, and publication
-figures; analyses over the original 50-million-token activation cache still require
-those local unpublished shards.
+same cell. The prompt report source is also explicit:
+
+```python
+SOURCE_MODE = "huggingface"
+EXPLANATION_BASE = "release"
+EXPLANATION_JSON = "example_explanation.json"
+```
+
+This resolves the checksummed file inside the selected Hugging Face snapshot. To inspect
+a smoke test stored in the clone, change both fields in the same configuration cell:
+
+```python
+EXPLANATION_BASE = "repository"
+EXPLANATION_JSON = "runs/hub-smoke-test-12x.json"
+```
+
+The notebook does not search for, auto-detect, or fall back to any other report. If the
+configured file is missing, it raises an error naming the exact path and settings to edit.
+Leave `DEVICE = "auto"` to select CUDA, then MPS, then CPU. The Hub bundle is sufficient
+for the released example heatmap, metrics, label analysis, and publication figures.
+Analyses over arbitrary new prompts still require running Gemma to create another report,
+and analyses over the original 50-million-token activation cache still require those
+local unpublished shards.
+
+Releases created before package version 0.7.0 do not contain the portable example. Pull
+the current source on the training machine, reinstall it, rerun the dry-run and public
+publish commands above, and record the new Hub commit SHA. No retraining, reevaluation, or
+relabeling is required.
 
 ### Suggested run sizes
 
@@ -1123,6 +1296,9 @@ cross-entropy, mean-ablation cross-entropy, cross-entropy increase, and loss rec
 - `private`: creates a private staging repository unless `--public` is passed.
 - `include_feature_reports`: defaults to false because activating text may carry privacy
   or licensing risk.
+- `example_explanation_path`: opt-in path to one safe prompt report. The publisher binds
+  it to the checkpoint, copies it as `example_explanation.json`, and includes it in the
+  release checksums so remote notebooks can reproduce prompt-level figures.
 
 ## Artifact layout
 
@@ -1155,6 +1331,7 @@ runs/e4b-layer20-batchtopk/
 │       ├── sae_config.json
 │       ├── activation_manifest.json
 │       ├── feature_labels.json
+│       ├── example_explanation.json
 │       └── checksums.json
 └── feature_reports/
     └── features.json
@@ -1164,10 +1341,11 @@ runs/e4b-layer20-batchtopk/
 token count, shard row counts, and per-file hashes. Checkpoints store the activation
 manifest and project-configuration hashes and refuse to run against a mismatched artifact.
 Release bundles omit the optimizer/RNG checkpoint and retain only inference weights,
-normalization, aggregate evidence, provenance, reusable feature labels, and checksums.
-Raw mined contexts remain excluded by default; the label registry contains descriptions,
-provenance, and aggregate validation metrics rather than held-out scorer text. Local
-`feature_labels/evidence/` snapshots are not copied into the release.
+normalization, aggregate evidence, provenance, reusable feature labels, explicitly
+selected example explanations, and checksums. Raw mined contexts remain excluded by
+default; the label registry contains descriptions, provenance, and aggregate validation
+metrics rather than held-out scorer text. Local `feature_labels/evidence/` snapshots are
+not copied into the release.
 
 ## Reading the metrics
 

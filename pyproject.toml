@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gemma4-sae"
-version = "0.6.3"
+version = "0.7.0"
 description = "Reproducible sparse-autoencoder training for Gemma 4 residual-stream activations"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -39,6 +39,7 @@ Issues = "https://github.com/lamm-mit/gemma-sae/issues"
 [project.optional-dependencies]
 quantization = ["bitsandbytes>=0.49"]
 notebook = [
+  "ipywidgets>=8.1",
   "jupyterlab>=4.3",
   "matplotlib>=3.9",
   "pandas>=2.2",

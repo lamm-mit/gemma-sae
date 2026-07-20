@@ -1,4 +1,6 @@
+import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +11,13 @@ from safetensors import safe_open
 import gemma4_sae.release as release_module
 import gemma4_sae.train as train_module
 from gemma4_sae.checkpoint import resolve_checkpoint
-from gemma4_sae.config import DataConfig, ModelConfig, ProjectConfig, SAEConfig
+from gemma4_sae.config import (
+    DataConfig,
+    ModelConfig,
+    ProjectConfig,
+    PublicationConfig,
+    SAEConfig,
+)
 from gemma4_sae.label import checkpoint_identity
 from gemma4_sae.release import (
     build_release_bundle,
@@ -130,6 +138,55 @@ def test_release_bundle_is_inference_only_and_hashed(tmp_path: Path, monkeypatch
     (release_dir / "sae_config.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="checksum mismatch"):
         verify_release_bundle(release_dir)
+
+
+def test_release_includes_checkpoint_bound_example_explanation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = _trained_tiny_config(tmp_path, monkeypatch)
+    checkpoint_path = resolve_checkpoint(config.sae.run_dir, "latest")
+    assert checkpoint_path is not None
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    manifest = load_manifest(config.data.activation_dir)
+    identity = checkpoint_identity(config, checkpoint, checkpoint_path, manifest)
+    prompt = "A portable interpretability example."
+    example_path = tmp_path / "prompt-example.json"
+    example_path.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                **identity,
+                "prompt": prompt,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "tokens": [],
+                "prompt_features": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = replace(
+        config,
+        publication=PublicationConfig(
+            example_explanation_path=str(example_path),
+        ),
+    )
+
+    release_dir = build_release_bundle(config)
+    released_example = release_dir / "example_explanation.json"
+    checksums = verify_release_bundle(release_dir)
+    metadata = json.loads((release_dir / "release_metadata.json").read_text())
+
+    assert released_example.exists()
+    assert "example_explanation.json" in checksums
+    assert metadata["contains_example_explanation"] is True
+    assert json.loads(released_example.read_text())["prompt"] == prompt
+
+    report = json.loads(example_path.read_text())
+    report["checkpoint_step"] += 1
+    example_path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ValueError, match="different SAE checkpoint"):
+        build_release_bundle(config)
 
 
 def test_publish_dry_run_never_calls_hugging_face(tmp_path: Path, monkeypatch) -> None:

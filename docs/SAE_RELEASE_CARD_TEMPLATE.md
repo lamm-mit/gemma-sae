@@ -119,4 +119,7 @@ feature labels, intervention side effects, and any failed or excluded runs.
 - Optimizer state excluded:
 - Required aggregate evidence present:
 - Mined contexts excluded or privacy/license review completed:
+- Example explanation included, if any:
+- Example prompt disclosure and privacy/license review completed:
+- Example explanation checkpoint identity and checksum verified:
 - Organization write permission verified:
