@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from .checkpoint import (
     resolve_checkpoint,
@@ -126,6 +127,7 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
         config.data.activation_dir,
         config.sae.validation_fraction,
         config.sae.seed,
+        show_progress=True,
     )
     sae = BatchTopKSAE(
         d_model=d_model,
@@ -198,94 +200,125 @@ def train(config: ProjectConfig, resume: str | None = None) -> Path:
     started = time.perf_counter()
     last_checkpoint = requested_checkpoint
 
-    for step in range(start_step + 1, config.sae.max_steps + 1):
-        batch = next(train_batches)
-        x = ((batch.activations.float() - mean) / scale).to(device)
-        sae.train()
-        output = sae(x, use_threshold=False)
-        active = output.selected_indices.unique()
-        last_active_step[active] = step
-        dead = (step - last_active_step) >= config.sae.dead_after_steps
+    with tqdm(
+        range(start_step + 1, config.sae.max_steps + 1),
+        total=config.sae.max_steps,
+        initial=start_step,
+        desc="SAE training",
+        unit="step",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ) as progress:
+        for step in progress:
+            batch = next(train_batches)
+            x = ((batch.activations.float() - mean) / scale).to(device)
+            sae.train()
+            output = sae(x, use_threshold=False)
+            active = output.selected_indices.unique()
+            last_active_step[active] = step
+            dead = (step - last_active_step) >= config.sae.dead_after_steps
 
-        reconstruction_mse = F.mse_loss(output.reconstruction, x)
-        auxiliary_mse = sae.auxiliary_dead_feature_loss(
-            x,
-            output.reconstruction,
-            output.preactivations,
-            dead,
-            config.sae.auxiliary_top_k,
-        )
-        auxiliary_loss = config.sae.auxiliary_loss_coefficient * auxiliary_mse
-        loss = reconstruction_mse + auxiliary_loss
-
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        sae.remove_decoder_gradient_parallel_component_()
-        torch.nn.utils.clip_grad_norm_(sae.parameters(), config.sae.gradient_clip_norm)
-        optimizer.step()
-        scheduler.step()
-        sae.normalize_decoder_()
-        sae.update_inference_threshold_(output.batch_threshold)
-
-        resampled = 0
-        if (
-            config.sae.resample_dead_features
-            and step >= config.sae.dead_after_steps
-            and step % config.sae.resample_every_steps == 0
-        ):
-            dead_indices = dead.nonzero(as_tuple=False).flatten()
-            if len(dead_indices) > config.sae.max_resamples_per_event:
-                permutation = torch.randperm(len(dead_indices), device=device)
-                dead_indices = dead_indices[permutation[: config.sae.max_resamples_per_event]]
-            residual = x - output.reconstruction.detach()
-            resampled = sae.resample_dead_features_(dead_indices, residual, optimizer)
-            last_active_step[dead_indices] = step
-
-        if step == 1 or step % config.sae.log_every_steps == 0:
-            with torch.no_grad():
-                mean_l0 = (output.features > 0).sum(dim=-1).float().mean().item()
-                fve = 1.0 - (output.reconstruction - x).square().sum() / x.square().sum()
-                dead_fraction = (
-                    (step - last_active_step) >= config.sae.dead_after_steps
-                ).float().mean()
-            record = {
-                "step": step,
-                "loss": loss.item(),
-                "reconstruction_mse": reconstruction_mse.item(),
-                "auxiliary_mse": auxiliary_mse.item(),
-                "auxiliary_loss": auxiliary_loss.item(),
-                "fraction_variance_explained": float(fve),
-                "mean_l0": mean_l0,
-                "dead_fraction": float(dead_fraction),
-                "inference_threshold": sae.inference_threshold.item(),
-                "learning_rate": scheduler.get_last_lr()[0],
-                "resampled_features": resampled,
-                "tokens_seen": step * config.sae.train_batch_size,
-                "elapsed_seconds": time.perf_counter() - started,
-            }
-            append_jsonl(metrics_path, record)
-            print(
-                f"step {step:7d} · mse {record['reconstruction_mse']:.5f} · "
-                f"aux {record['auxiliary_loss']:.5f} · "
-                f"FVE {record['fraction_variance_explained']:.3f} · "
-                f"L0 {mean_l0:.1f} · dead {record['dead_fraction']:.2%}"
+            reconstruction_mse = F.mse_loss(output.reconstruction, x)
+            auxiliary_mse = sae.auxiliary_dead_feature_loss(
+                x,
+                output.reconstruction,
+                output.preactivations,
+                dead,
+                config.sae.auxiliary_top_k,
             )
+            auxiliary_loss = config.sae.auxiliary_loss_coefficient * auxiliary_mse
+            loss = reconstruction_mse + auxiliary_loss
 
-        if step % config.sae.checkpoint_every_steps == 0 or step == config.sae.max_steps:
-            payload = checkpoint_payload(
-                config,
-                step,
-                sae,
-                optimizer,
-                scheduler,
-                last_active_step,
-                manifest,
-                device,
-                mean,
-                scale,
-            )
-            last_checkpoint = save_checkpoint(run_dir, step, payload)
-            print(f"Saved {last_checkpoint}.")
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            sae.remove_decoder_gradient_parallel_component_()
+            torch.nn.utils.clip_grad_norm_(sae.parameters(), config.sae.gradient_clip_norm)
+            optimizer.step()
+            scheduler.step()
+            sae.normalize_decoder_()
+            sae.update_inference_threshold_(output.batch_threshold)
+
+            resampled = 0
+            if (
+                config.sae.resample_dead_features
+                and step >= config.sae.dead_after_steps
+                and step % config.sae.resample_every_steps == 0
+            ):
+                dead_indices = dead.nonzero(as_tuple=False).flatten()
+                if len(dead_indices) > config.sae.max_resamples_per_event:
+                    permutation = torch.randperm(len(dead_indices), device=device)
+                    dead_indices = dead_indices[
+                        permutation[: config.sae.max_resamples_per_event]
+                    ]
+                residual = x - output.reconstruction.detach()
+                resampled = sae.resample_dead_features_(
+                    dead_indices,
+                    residual,
+                    optimizer,
+                )
+                last_active_step[dead_indices] = step
+
+            if step == 1 or step % config.sae.log_every_steps == 0:
+                with torch.no_grad():
+                    mean_l0 = (
+                        (output.features > 0).sum(dim=-1).float().mean().item()
+                    )
+                    fve = (
+                        1.0
+                        - (output.reconstruction - x).square().sum()
+                        / x.square().sum()
+                    )
+                    dead_fraction = (
+                        (step - last_active_step) >= config.sae.dead_after_steps
+                    ).float().mean()
+                record = {
+                    "step": step,
+                    "loss": loss.item(),
+                    "reconstruction_mse": reconstruction_mse.item(),
+                    "auxiliary_mse": auxiliary_mse.item(),
+                    "auxiliary_loss": auxiliary_loss.item(),
+                    "fraction_variance_explained": float(fve),
+                    "mean_l0": mean_l0,
+                    "dead_fraction": float(dead_fraction),
+                    "inference_threshold": sae.inference_threshold.item(),
+                    "learning_rate": scheduler.get_last_lr()[0],
+                    "resampled_features": resampled,
+                    "tokens_seen": step * config.sae.train_batch_size,
+                    "elapsed_seconds": time.perf_counter() - started,
+                }
+                append_jsonl(metrics_path, record)
+                progress.set_postfix(
+                    mse=f"{record['reconstruction_mse']:.4f}",
+                    FVE=f"{record['fraction_variance_explained']:.3f}",
+                    L0=f"{mean_l0:.1f}",
+                    dead=f"{record['dead_fraction']:.1%}",
+                    refresh=False,
+                )
+                progress.write(
+                    f"step {step:7d} · mse {record['reconstruction_mse']:.5f} · "
+                    f"aux {record['auxiliary_loss']:.5f} · "
+                    f"FVE {record['fraction_variance_explained']:.3f} · "
+                    f"L0 {mean_l0:.1f} · dead {record['dead_fraction']:.2%}"
+                )
+
+            if (
+                step % config.sae.checkpoint_every_steps == 0
+                or step == config.sae.max_steps
+            ):
+                payload = checkpoint_payload(
+                    config,
+                    step,
+                    sae,
+                    optimizer,
+                    scheduler,
+                    last_active_step,
+                    manifest,
+                    device,
+                    mean,
+                    scale,
+                )
+                last_checkpoint = save_checkpoint(run_dir, step, payload)
+                progress.write(f"Saved {last_checkpoint}.")
 
     if last_checkpoint is None:
         raise RuntimeError("Training completed without producing a checkpoint.")

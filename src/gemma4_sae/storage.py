@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from numpy.lib.format import open_memmap
 from torch import Tensor
+from tqdm.auto import tqdm
 
 from .provenance import file_sha256
 
@@ -234,6 +235,8 @@ def compute_training_statistics(
     validation_fraction: float,
     seed: int,
     chunk_rows: int = 8192,
+    *,
+    show_progress: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Compute normalization from training shards without retaining their file cache."""
 
@@ -248,21 +251,39 @@ def compute_training_statistics(
     total = 0
     value_sum = np.zeros(d_model, dtype=np.float64)
     square_sum = np.zeros(d_model, dtype=np.float64)
-    for shard in training_shards:
-        rows = int(shard["rows"])
-        path = root / f"{shard['stem']}.activations.npy"
-        activations = np.load(path, mmap_mode="r")
-        try:
-            for start in range(0, rows, chunk_rows):
-                values = np.asarray(
-                    activations[start : min(start + chunk_rows, rows)]
-                ).astype(np.float64)
-                value_sum += values.sum(axis=0)
-                square_sum += np.square(values).sum(axis=0)
-                total += len(values)
-        finally:
-            _release_mapped_file_cache(activations, path)
-            del activations
+    progress = (
+        tqdm(
+            total=sum(int(shard["rows"]) for shard in training_shards),
+            desc="Normalization",
+            unit="row",
+            unit_scale=True,
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )
+        if show_progress
+        else None
+    )
+    try:
+        for shard in training_shards:
+            rows = int(shard["rows"])
+            path = root / f"{shard['stem']}.activations.npy"
+            activations = np.load(path, mmap_mode="r")
+            try:
+                for start in range(0, rows, chunk_rows):
+                    values = np.asarray(
+                        activations[start : min(start + chunk_rows, rows)]
+                    ).astype(np.float64)
+                    value_sum += values.sum(axis=0)
+                    square_sum += np.square(values).sum(axis=0)
+                    total += len(values)
+                    if progress is not None:
+                        progress.update(len(values))
+            finally:
+                _release_mapped_file_cache(activations, path)
+                del activations
+    finally:
+        if progress is not None:
+            progress.close()
     if total == 0:
         raise RuntimeError("No training activation rows are available.")
     mean = value_sum / total

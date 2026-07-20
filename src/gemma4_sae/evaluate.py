@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+from itertools import islice
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from .checkpoint import resolve_checkpoint, validate_checkpoint_provenance
 from .config import ProjectConfig, load_config
 from .devices import select_device
 from .sae import BatchTopKSAE
-from .storage import iter_activation_batches, load_manifest
+from .storage import iter_activation_batches, load_manifest, partition_shards
 
 
 def build_sae_from_checkpoint(checkpoint: dict, device: torch.device) -> BatchTopKSAE:
@@ -52,6 +55,17 @@ def evaluate_cached_activations(
         validation_fraction=config.sae.validation_fraction,
         repeat=False,
     )
+    manifest = load_manifest(config.data.activation_dir)
+    _, validation_shards = partition_shards(
+        manifest["shards"],
+        config.sae.validation_fraction,
+        config.sae.seed,
+    )
+    available_batches = sum(
+        math.ceil(int(shard["rows"]) / config.sae.train_batch_size)
+        for shard in validation_shards
+    )
+    evaluation_batches = min(max_batches, available_batches)
 
     squared_error = 0.0
     target_energy = 0.0
@@ -61,9 +75,14 @@ def evaluate_cached_activations(
     feature_counts = torch.zeros(sae.n_features, dtype=torch.long, device=device)
     l0_values = []
 
-    for batch_index, batch in enumerate(iterator):
-        if batch_index >= max_batches:
-            break
+    for batch in tqdm(
+        islice(iterator, max_batches),
+        total=evaluation_batches,
+        desc="SAE evaluation",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=1.0,
+    ):
         x = ((batch.activations.float() - mean) / scale).to(device)
         output = sae(x, use_threshold=True)
         squared_error += (output.reconstruction - x).square().sum().item()

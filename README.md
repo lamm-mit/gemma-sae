@@ -693,6 +693,11 @@ script verifies activation headers once, never recollects activations, and print
 the configured 90% utilization gate. Checkpoints are saved every 5,000 steps to limit
 the two new runs to roughly 16 GB of checkpoint storage.
 
+Each run displays separate tqdm bars for the normalization scan, 25,000 optimization
+steps, and held-out evaluation batches. The training bar shows live MSE, FVE, L0, dead
+fraction, throughput, and ETA; tqdm-safe checkpoint and metric lines remain usable in
+the corresponding `tee` logs.
+
 Activation readers advise Linux to evict clean pages after each completed memory-mapped
 shard. This matters on DGX Spark because the GB10 GPU and CPU share physical memory:
 a normalization pass over hundreds of gigabytes can otherwise leave almost all RAM in
