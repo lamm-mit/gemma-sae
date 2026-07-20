@@ -143,12 +143,15 @@ HF_REPO_REVISION = None
 HF_CACHE_DIR = None
 HF_LOCAL_FILES_ONLY = False
 LOCAL_CONFIG_PATH = "configs/e4b_layer20_batchtopk_dgx_spark_12x_l064.yaml"
-EXPLANATION_BASE = "release"
+EXPLANATION_BASE = "disabled"
 EXPLANATION_JSON = "example_explanation.json"
 DEVICE = "auto"
 ```
 
 Set `SOURCE_MODE = "local"` to use `LOCAL_CONFIG_PATH`. Set
+`EXPLANATION_BASE = "release"` after publishing a release that contains the configured
+portable report. Releases created before version 0.7.0 do not contain it, so the safe
+default disables only that optional section. Set
 `EXPLANATION_BASE = "repository"` and give `EXPLANATION_JSON` a repository-relative or
 absolute filename to inspect another report. There is no automatic fallback to a smoke
 test or another path. `REPOSITORY_ROOT` is checked only for those two local modes; the
@@ -1158,24 +1161,27 @@ jupyter lab notebooks/analyze_gemma4_sae.ipynb
 The notebook already sets
 `HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` inside its first code cell.
 For a frozen paper analysis, paste the saved commit SHA into `HF_REPO_REVISION` in that
-same cell. The prompt report source is also explicit:
+same cell. The prompt report source is also explicit. Releases created before version
+0.7.0 do not contain the optional portable file, so leave that section disabled:
 
 ```python
 SOURCE_MODE = "huggingface"
-EXPLANATION_BASE = "release"
+EXPLANATION_BASE = "disabled"
 EXPLANATION_JSON = "example_explanation.json"
 ```
 
-This resolves the checksummed file inside the selected Hugging Face snapshot. To inspect
-a smoke test stored in the clone, change both fields in the same configuration cell:
+After republishing with the portable report, set `EXPLANATION_BASE = "release"` to resolve
+the checksummed file inside the selected Hugging Face snapshot. To inspect a smoke test
+stored in the clone, change both fields in the same configuration cell:
 
 ```python
 EXPLANATION_BASE = "repository"
 EXPLANATION_JSON = "runs/hub-smoke-test-12x.json"
 ```
 
-The notebook does not search for, auto-detect, or fall back to any other report. If the
-configured file is missing, it raises an error naming the exact path and settings to edit.
+The notebook does not search for, auto-detect, or fall back to any other report. When
+enabled, a missing configured file raises an error naming the exact path and settings to
+edit.
 Leave `DEVICE = "auto"` to select CUDA, then MPS, then CPU. The Hub bundle is sufficient
 for the released example heatmap, metrics, label analysis, and publication figures.
 Analyses over arbitrary new prompts still require running Gemma to create another report,
