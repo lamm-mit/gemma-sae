@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 import torch
 
+import gemma4_sae.storage as storage_module
 from gemma4_sae.storage import (
     ActivationShardWriter,
+    compute_training_statistics,
     iter_activation_batches,
     load_manifest,
 )
@@ -81,3 +83,41 @@ def test_validation_split_reserves_whole_shard(tmp_path: Path) -> None:
     assert sum(len(batch.token_ids) for batch in validation) == 5
     observed = set(torch.cat([batch.token_ids for batch in validation]).tolist())
     assert observed == set(range(5)) or observed == set(range(5, 10))
+
+
+def test_training_statistics_release_each_training_shard_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    writer = ActivationShardWriter(
+        tmp_path,
+        d_model=2,
+        tokens_per_shard=5,
+        context_width=1,
+        metadata={},
+    )
+    writer.append(
+        torch.arange(20, dtype=torch.float32).reshape(10, 2),
+        torch.arange(10),
+        torch.arange(10).reshape(10, 1),
+    )
+    writer.close()
+    released = []
+    monkeypatch.setattr(
+        storage_module,
+        "_release_mapped_file_cache",
+        lambda _array, path: released.append(Path(path)),
+    )
+
+    mean, scale, rows = compute_training_statistics(
+        tmp_path,
+        validation_fraction=0.49,
+        seed=0,
+        chunk_rows=2,
+    )
+
+    assert rows == 5
+    assert mean.shape == (2,)
+    assert scale.item() > 0
+    assert len(released) == 1
+    assert released[0].name.endswith(".activations.npy")

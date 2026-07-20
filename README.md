@@ -693,6 +693,12 @@ script verifies activation headers once, never recollects activations, and print
 the configured 90% utilization gate. Checkpoints are saved every 5,000 steps to limit
 the two new runs to roughly 16 GB of checkpoint storage.
 
+Activation readers advise Linux to evict clean pages after each completed memory-mapped
+shard. This matters on DGX Spark because the GB10 GPU and CPU share physical memory:
+a normalization pass over hundreds of gigabytes can otherwise leave almost all RAM in
+file cache and make a subsequent CUDA allocation fail even when `nvidia-smi` shows no
+compute process.
+
 Do not run live-model fidelity or develop labels for every sweep member. In the morning,
 select the narrowest model that clears the utilization gate without an unacceptable
 reconstruction drop, then run fidelity and checkpoint-bound labeling for that winner.

@@ -64,6 +64,24 @@ def filesystem_capacity(path: str | Path) -> dict[str, int | str]:
     }
 
 
+def linux_memory_status(path: str | Path = "/proc/meminfo") -> dict[str, int]:
+    """Return selected Linux memory counters as bytes when procfs is available."""
+
+    source = Path(path)
+    if not source.exists():
+        return {}
+    wanted = {"MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached"}
+    result = {}
+    for line in source.read_text(encoding="utf-8").splitlines():
+        key, separator, remainder = line.partition(":")
+        if not separator or key not in wanted:
+            continue
+        fields = remainder.split()
+        if len(fields) >= 2 and fields[1] == "kB":
+            result[key] = int(fields[0]) * 1024
+    return result
+
+
 def diagnose(config: ProjectConfig) -> dict:
     device = select_device(config.model.backend)
     dtype = resolve_model_dtype(config.model.dtype, device)
@@ -103,6 +121,7 @@ def diagnose(config: ProjectConfig) -> dict:
             )
 
     accelerator = {}
+    system_memory = linux_memory_status()
     if device.type == "cuda":
         capability = torch.cuda.get_device_capability(device)
         accelerator = {
@@ -114,6 +133,17 @@ def diagnose(config: ProjectConfig) -> dict:
         }
         if config.model.dtype == "bfloat16" and not accelerator["bfloat16_supported"]:
             warnings.append("The configuration requires BF16, but CUDA reports no BF16 support.")
+        if (
+            accelerator["is_dgx_spark_gb10"]
+            and system_memory.get("MemFree", 2**63) < 4 * 1024**3
+            and system_memory.get("MemAvailable", 0) >= 16 * 1024**3
+            and system_memory.get("Cached", 0) >= 16 * 1024**3
+        ):
+            warnings.append(
+                "DGX Spark unified memory has less than 4 GiB physically free while "
+                "Linux file cache holds at least 16 GiB. Cached activation readers must "
+                "release completed shard pages before CUDA allocations."
+            )
 
     return {
         "config_sha256": canonical_sha256(config.to_dict()),
@@ -131,6 +161,7 @@ def diagnose(config: ProjectConfig) -> dict:
         "storage": storage,
         "activation_filesystem": activation_filesystem,
         "run_filesystem": run_filesystem,
+        "system_memory": system_memory,
         "activation_manifest_exists": (activation_dir / MANIFEST_NAME).exists(),
         "warnings": warnings,
         "runtime": runtime_metadata(device),

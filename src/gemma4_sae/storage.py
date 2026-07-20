@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
+import os
 import random
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -197,13 +199,43 @@ def partition_shards(
     return training, validation
 
 
+def _release_mapped_file_cache(array: np.memmap, path: Path) -> None:
+    """Release clean mmap pages after a shard pass, especially on unified-memory GPUs."""
+
+    mapping = getattr(array, "_mmap", None)
+    if (
+        mapping is not None
+        and hasattr(mapping, "madvise")
+        and hasattr(mmap, "MADV_DONTNEED")
+    ):
+        try:
+            mapping.madvise(mmap.MADV_DONTNEED)
+        except (BufferError, OSError, ValueError):
+            pass
+
+    posix_fadvise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if posix_fadvise is None or dontneed is None:
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        posix_fadvise(descriptor, 0, 0, dontneed)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def compute_training_statistics(
     root: str | Path,
     validation_fraction: float,
     seed: int,
     chunk_rows: int = 8192,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Compute normalization from training shards only."""
+    """Compute normalization from training shards without retaining their file cache."""
 
     root = Path(root)
     manifest = load_manifest(root)
@@ -218,17 +250,19 @@ def compute_training_statistics(
     square_sum = np.zeros(d_model, dtype=np.float64)
     for shard in training_shards:
         rows = int(shard["rows"])
-        activations = np.load(
-            root / f"{shard['stem']}.activations.npy",
-            mmap_mode="r",
-        )
-        for start in range(0, rows, chunk_rows):
-            values = np.asarray(activations[start : min(start + chunk_rows, rows)]).astype(
-                np.float64
-            )
-            value_sum += values.sum(axis=0)
-            square_sum += np.square(values).sum(axis=0)
-            total += len(values)
+        path = root / f"{shard['stem']}.activations.npy"
+        activations = np.load(path, mmap_mode="r")
+        try:
+            for start in range(0, rows, chunk_rows):
+                values = np.asarray(
+                    activations[start : min(start + chunk_rows, rows)]
+                ).astype(np.float64)
+                value_sum += values.sum(axis=0)
+                square_sum += np.square(values).sum(axis=0)
+                total += len(values)
+        finally:
+            _release_mapped_file_cache(activations, path)
+            del activations
     if total == 0:
         raise RuntimeError("No training activation rows are available.")
     mean = value_sum / total
@@ -271,19 +305,30 @@ def iter_activation_batches(
             rows = int(shard["rows"])
             rng = np.random.default_rng(seed + epoch * 1_000_003 + int(stem.split("-")[-1]))
             order = rng.permutation(np.arange(rows))
-            activations = np.load(root / f"{stem}.activations.npy", mmap_mode="r")
-            tokens = np.load(root / f"{stem}.tokens.npy", mmap_mode="r")
-            contexts = np.load(root / f"{stem}.contexts.npy", mmap_mode="r")
+            activation_path = root / f"{stem}.activations.npy"
+            token_path = root / f"{stem}.tokens.npy"
+            context_path = root / f"{stem}.contexts.npy"
+            activations = np.load(activation_path, mmap_mode="r")
+            tokens = np.load(token_path, mmap_mode="r")
+            contexts = np.load(context_path, mmap_mode="r")
 
-            for offset in range(0, len(order), batch_size):
-                indices = order[offset : offset + batch_size]
-                if len(indices) < batch_size and not validation:
-                    continue
-                yield ActivationBatch(
-                    activations=torch.from_numpy(np.asarray(activations[indices]).copy()),
-                    token_ids=torch.from_numpy(np.asarray(tokens[indices]).copy()),
-                    contexts=torch.from_numpy(np.asarray(contexts[indices]).copy()),
-                )
+            try:
+                for offset in range(0, len(order), batch_size):
+                    indices = order[offset : offset + batch_size]
+                    if len(indices) < batch_size and not validation:
+                        continue
+                    yield ActivationBatch(
+                        activations=torch.from_numpy(
+                            np.asarray(activations[indices]).copy()
+                        ),
+                        token_ids=torch.from_numpy(np.asarray(tokens[indices]).copy()),
+                        contexts=torch.from_numpy(np.asarray(contexts[indices]).copy()),
+                    )
+            finally:
+                _release_mapped_file_cache(activations, activation_path)
+                _release_mapped_file_cache(tokens, token_path)
+                _release_mapped_file_cache(contexts, context_path)
+                del activations, tokens, contexts
         if not repeat:
             return
         epoch += 1
