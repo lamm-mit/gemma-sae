@@ -123,10 +123,12 @@ python -m pip install -e ".[notebook]"
 jupyter lab notebooks/analyze_gemma4_sae.ipynb
 ```
 
-Set either `HF_REPO_ID` or `LOCAL_CONFIG_PATH` in the notebook's first code cell. Set
-`EXPLANATION_JSON` there as well to render a saved prompt's token-by-feature heatmap.
-Hub mode downloads and verifies the inference release; analyses requiring unpublished
-activation shards remain clearly unavailable.
+The notebook's first code cell defaults to
+`HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` and therefore loads the
+verified inference release directly from Hugging Face. Set `HF_REPO_ID = ""` to use
+`LOCAL_CONFIG_PATH` for a local training run. Set `EXPLANATION_JSON` there as well to
+render a saved prompt's token-by-feature heatmap. Analyses requiring unpublished
+activation shards remain clearly unavailable in Hub mode.
 
 For development:
 
