@@ -217,10 +217,12 @@ gemma4-sae label --config "$CONFIG" --provider transformers --model "ORG/INSTRUC
 gemma4-sae publish --config "$CONFIG" --checkpoint latest --dry-run
 ```
 
-### Full DGX Spark run
+### Full DGX Spark 16× baseline run
 
-The checked-in `e4b_layer20_batchtopk_dgx_spark.yaml` configuration is the primary
-single-layer research run:
+The checked-in `e4b_layer20_batchtopk_dgx_spark.yaml` configuration is the original
+16× single-layer baseline. It produced the shared 50-million-token activation cache used
+by the subsequent width sweep. The selected 12× release candidate and its complete
+finalization workflow are documented below.
 
 - CUDA and BF16 are mandatory, so it fails instead of silently falling back to CPU;
 - 50 million FineWeb activation tokens;
@@ -355,7 +357,8 @@ git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install -e ".[notebook]"
 
-export CONFIG=configs/e4b_layer20_batchtopk_dgx_spark.yaml
+export CONFIG=configs/e4b_layer20_batchtopk_dgx_spark_12x_l064.yaml
+export RUN_DIR=runs/e4b-layer20-batchtopk-dgx-50m-12x-l064-auxk512-seed17
 read -rsp "OpenAI API key: " OPENAI_API_KEY
 echo
 export OPENAI_API_KEY
@@ -656,7 +659,7 @@ change that explicit threshold only with a documented scientific rationale.
 Each BF16/FP16 activation vector requires `2 × 2,560 = 5,120` bytes. Plan disk
 capacity before increasing `max_activation_tokens`.
 
-## DGX Spark primary experiment
+## DGX Spark 16× baseline experiment
 
 | Setting | Value |
 |---|---:|
@@ -708,6 +711,306 @@ Do not run live-model fidelity or develop labels for every sweep member. In the 
 select the narrowest model that clears the utilization gate without an unacceptable
 reconstruction drop, then run fidelity and checkpoint-bound labeling for that winner.
 The earlier 16× label registry cannot be transferred to a new checkpoint.
+
+### Selected 12× release candidate
+
+The completed controlled sweep selected the 12× checkpoint. All three runs used the same
+Gemma revision, layer, 50-million-token FineWeb activation cache, target L0, optimizer
+example budget, auxiliary objective, and random seed. Fidelity used the same pinned
+Wikitext-103 test split and 256 sequences.
+
+| Width | Features | Held-out FVE | Cosine | Mean L0 | Active features | Loss recovered | Decision |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 8× | 20,480 | 0.8391 | 0.9147 | 64.07 | 100.00% | 0.7907 | passes utilization gate |
+| **12×** | **30,720** | **0.8415** | **0.9160** | **64.15** | **100.00%** | **0.8030** | **selected release candidate** |
+| 16× | 40,960 | 0.8403 | 0.9151 | 64.09 | 81.09% | 0.8099 | fails 90% utilization gate |
+
+The 12× run has the strongest FVE and cosine similarity of the three, preserves more
+language-model loss than 8×, and activates every feature in the one-million-example
+held-out scan. The 16× run has slightly higher loss recovery but fails the configured
+feature-utilization gate. This is a release-candidate decision for this controlled sweep,
+not a publication-level claim: a paper still requires multiple seeds and the analyses in
+the publication protocol.
+
+### Finalize, publish, and test the selected 12× release
+
+The following is the complete post-training workflow. Run it from the repository on the
+DGX Spark. It deliberately targets the canonical public repository
+`lamm-mit/gemma-4-e4b-layer20-batchtopk-sae`, overriding the experiment-specific staging
+repository in the 12× YAML.
+
+First update the checkout, install the current CLI, and select the exact run:
+
+```bash
+cd ~/gemma-sae
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install --upgrade-strategy only-if-needed -e ".[notebook]"
+
+mkdir -p logs
+set -o pipefail
+
+export CONFIG="configs/e4b_layer20_batchtopk_dgx_spark_12x_l064.yaml"
+export RUN_DIR="runs/e4b-layer20-batchtopk-dgx-50m-12x-l064-auxk512-seed17"
+export HF_REPO_ID="lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
+export RELEASE_DIR="$RUN_DIR/release/step-00025000"
+export PYTHONUNBUFFERED=1
+```
+
+If `evaluation.json` or `fidelity.json` is not already present, create it before
+labeling. These commands are safe to omit when the files from the completed runs shown
+above already exist:
+
+```bash
+test -f "$RUN_DIR/evaluation.json" || gemma4-sae evaluate \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --max-batches 1000000 \
+  2>&1 | tee logs/evaluate-12x-final.log
+
+test -f "$RUN_DIR/fidelity.json" || gemma4-sae fidelity \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  2>&1 | tee logs/fidelity-12x-final.log
+```
+
+Develop the initial 64 labels for the selected checkpoint. This small included corpus
+demonstrates the complete machinery but does not by itself establish publication-quality
+scientific interpretations. The command is resumable; existing compatible feature IDs
+are skipped:
+
+```bash
+read -rsp "OpenAI API key: " OPENAI_API_KEY
+echo
+export OPENAI_API_KEY
+
+gemma4-sae develop-labels \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --corpus examples/science_label_corpus.jsonl \
+  --text-column text \
+  --n-features 64 \
+  --ranking coverage \
+  --train-contexts 8 \
+  --heldout-contexts 4 \
+  --provider openai \
+  --model gpt-5.6 \
+  --max-output-tokens 25000 \
+  --retries 2 \
+  --acknowledge-external-data \
+  2>&1 | tee logs/develop-science-labels-12x.log
+```
+
+Confirm that the checkpoint, aggregate evaluations, and checkpoint-bound label registry
+exist, then print the release gates and label statuses:
+
+```bash
+test -f "$RUN_DIR/checkpoints/latest.json"
+test -f "$RUN_DIR/evaluation.json"
+test -f "$RUN_DIR/fidelity.json"
+test -f "$RUN_DIR/feature_labels/labels.json"
+
+python - <<'PY'
+import json
+import os
+from collections import Counter
+from pathlib import Path
+
+run = Path(os.environ["RUN_DIR"])
+evaluation = json.loads((run / "evaluation.json").read_text())["metrics"]
+fidelity = json.loads((run / "fidelity.json").read_text())["metrics"]
+labels = json.loads(
+    (run / "feature_labels" / "labels.json").read_text()
+)["labels"]
+
+print("FVE:", evaluation["fraction_variance_explained"])
+print("cosine:", evaluation["mean_cosine_similarity"])
+print("mean L0:", evaluation["mean_l0"])
+print("active feature fraction:", evaluation["active_feature_fraction"])
+print("loss recovered:", fidelity["loss_recovered"])
+print("labels:", len(labels))
+print("label statuses:", dict(Counter(item["status"] for item in labels)))
+
+assert evaluation["active_feature_fraction"] >= 0.90
+assert len(labels) >= 64
+print("Configured release gates passed.")
+PY
+```
+
+Build the inference-only release without making a network change. The dry run writes the
+local bundle, computes checksums, and reports missing evidence or failed quality gates:
+
+```bash
+gemma4-sae publish \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --repo-id "$HF_REPO_ID" \
+  --public \
+  --dry-run \
+  2>&1 | tee logs/publish-dry-run-12x.json
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("logs/publish-dry-run-12x.json").read_text())
+assert report["missing_required_evidence"] == []
+assert report["quality_failures"] == []
+print("Dry-run publication checks passed:", report["release_dir"])
+PY
+```
+
+Verify every local release checksum and the expected 12× metadata before uploading:
+
+```bash
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+from gemma4_sae.release import verify_release_bundle
+
+release = Path(os.environ["RELEASE_DIR"])
+checksums = verify_release_bundle(release)
+sae = json.loads((release / "sae_config.json").read_text())
+metadata = json.loads((release / "release_metadata.json").read_text())
+labels = json.loads((release / "feature_labels.json").read_text())["labels"]
+
+assert sae["n_features"] == 30_720
+assert sae["checkpoint_step"] == 25_000
+assert metadata["hf_repo_id"] == os.environ["HF_REPO_ID"]
+assert metadata["contains_feature_labels"] is True
+assert len(labels) >= 64
+
+print("Verified files:", len(checksums))
+print("Features:", sae["n_features"])
+print("Checkpoint step:", sae["checkpoint_step"])
+print("Included labels:", len(labels))
+PY
+```
+
+Authenticate with a Hugging Face token that can write to the `lamm-mit` organization,
+confirm the account, and perform the public upload:
+
+```bash
+read -rsp "Hugging Face write token: " HF_TOKEN
+echo
+export HF_TOKEN
+
+python - <<'PY'
+import os
+from huggingface_hub import HfApi
+
+identity = HfApi(token=os.environ["HF_TOKEN"]).whoami()
+print("Authenticated Hugging Face account:", identity["name"])
+PY
+
+gemma4-sae publish \
+  --config "$CONFIG" \
+  --checkpoint latest \
+  --repo-id "$HF_REPO_ID" \
+  --public \
+  2>&1 | tee logs/publish-12x.json
+```
+
+Resolve and save the immutable Hub commit SHA rather than relying on a moving `main`
+revision:
+
+```bash
+python - <<'PY' | tee logs/hf-12x-revision.txt
+import os
+from huggingface_hub import HfApi
+
+info = HfApi(token=os.environ["HF_TOKEN"]).model_info(
+    os.environ["HF_REPO_ID"]
+)
+print(info.sha)
+PY
+
+export HF_REVISION="$(tail -n 1 logs/hf-12x-revision.txt)"
+test -n "$HF_REVISION"
+echo "Published revision: $HF_REVISION"
+```
+
+Download that exact Hub revision through the normal release loader. This independently
+checks every downloaded file against `checksums.json` and confirms that the portable
+bundle contains the expected SAE and labels:
+
+```bash
+python - <<'PY'
+import json
+import os
+from gemma4_sae.release import resolve_release_bundle, verify_release_bundle
+
+release = resolve_release_bundle(
+    os.environ["HF_REPO_ID"],
+    revision=os.environ["HF_REVISION"],
+)
+checksums = verify_release_bundle(release)
+sae = json.loads((release / "sae_config.json").read_text())
+labels = json.loads((release / "feature_labels.json").read_text())["labels"]
+
+assert sae["n_features"] == 30_720
+assert sae["checkpoint_step"] == 25_000
+assert len(labels) >= 64
+
+print("Verified Hub snapshot:", release)
+print("Verified files:", len(checksums))
+print("Included labels:", len(labels))
+PY
+```
+
+Finally, run a real prompt through Gemma and the SAE loaded from the immutable Hub
+release, then inspect the strongest prompt-level features and any reusable labels:
+
+```bash
+gemma4-sae explain \
+  --sae-repo "$HF_REPO_ID" \
+  --sae-revision "$HF_REVISION" \
+  --device cuda \
+  --text "A catalyst lowers the activation energy without changing the reaction equilibrium." \
+  --top-features 5 \
+  --top-prompt-features 20 \
+  --output runs/hub-smoke-test-12x.json
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("runs/hub-smoke-test-12x.json").read_text())
+print("Model:", report["model_id"])
+print("Layer:", report["layer_index"])
+print("Mean prompt L0:", report["mean_inference_l0"])
+print("Labeled prompt-feature fraction:", report["labeled_prompt_feature_fraction"])
+
+for feature in report["prompt_features"][:10]:
+    interpretation = feature.get("interpretation") or {}
+    print(
+        feature["feature_id"],
+        f'{feature["max_activation"]:.3f}',
+        interpretation.get("label", "unlabeled"),
+    )
+PY
+```
+
+On any CUDA, Apple Silicon, or CPU analysis machine, install the package and open the
+notebook:
+
+```bash
+git clone https://github.com/lamm-mit/gemma-sae.git
+cd gemma-sae
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[notebook]"
+jupyter lab notebooks/analyze_gemma4_sae.ipynb
+```
+
+The notebook already sets
+`HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"` inside its first code cell.
+For a frozen paper analysis, paste the saved commit SHA into `HF_REPO_REVISION` in that
+same cell. Leave `DEVICE = "auto"` to select CUDA, then MPS, then CPU. The Hub bundle is
+sufficient for prompt explanations, released metrics, label analysis, and publication
+figures; analyses over the original 50-million-token activation cache still require
+those local unpublished shards.
 
 ### Suggested run sizes
 
