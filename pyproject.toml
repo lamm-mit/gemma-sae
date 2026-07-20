@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gemma4-sae"
-version = "0.7.0"
+version = "0.7.1"
 description = "Reproducible sparse-autoencoder training for Gemma 4 residual-stream activations"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -27,6 +27,7 @@ dependencies = [
   "pyyaml>=6.0",
   "safetensors>=0.5",
   "torch>=2.7",
+  "torchvision>=0.22",
   "tqdm>=4.66",
   "transformers>=5.13,<6",
 ]

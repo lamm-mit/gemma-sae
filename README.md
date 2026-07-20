@@ -136,7 +136,7 @@ for notebook configuration and does not infer one source from whether another fi
 empty. The defaults are explicit:
 
 ```python
-REPOSITORY_ROOT = "."
+REPOSITORY_ROOT = ".."  # kernel working directory is gemma-sae/notebooks/
 SOURCE_MODE = "huggingface"
 HF_REPO_ID = "lamm-mit/gemma-4-e4b-layer20-batchtopk-sae"
 HF_REPO_REVISION = None
@@ -151,7 +151,9 @@ DEVICE = "auto"
 Set `SOURCE_MODE = "local"` to use `LOCAL_CONFIG_PATH`. Set
 `EXPLANATION_BASE = "repository"` and give `EXPLANATION_JSON` a repository-relative or
 absolute filename to inspect another report. There is no automatic fallback to a smoke
-test or another path. `DEVICE = "auto"` selects CUDA, then Apple MPS, then CPU;
+test or another path. `REPOSITORY_ROOT` is checked only for those two local modes; the
+default Hub-release analysis does not require a repository checkout. `DEVICE = "auto"`
+selects CUDA, then Apple MPS, then CPU;
 `ANALYSIS_BATCH_SIZE` controls local activation-analysis memory. Analyses requiring
 unpublished activation shards remain clearly unavailable in Hub mode.
 

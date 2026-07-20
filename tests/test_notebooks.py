@@ -40,3 +40,5 @@ def test_publication_notebook_has_explicit_sources_and_no_environment_reads() ->
     assert "os.getenv" not in source
     assert "default_explanation_path" not in source
     assert "Auto-detected explanation report" not in source
+    assert 'REPOSITORY_ROOT = ".."' in source
+    assert 'SOURCE_MODE == "local" or EXPLANATION_BASE == "repository"' in source
