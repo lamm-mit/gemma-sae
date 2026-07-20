@@ -671,6 +671,29 @@ capacity before increasing `max_activation_tokens`.
 | Estimated checkpoint storage | 25.2 GB |
 | Independent fidelity sequences | 256 |
 
+### Overnight utilization sweep
+
+The checked-in overnight sweep reuses the immutable 50M-token activation cache and trains
+controlled 8× and 12× width variants at the same target L0, optimizer-example budget,
+auxiliary objective, and seed as the completed 16× baseline:
+
+```bash
+bash scripts/dgx_overnight_width_sweep.sh \
+  2>&1 | tee logs/overnight-width-sweep.log
+```
+
+The runs are sequential so they do not compete for DGX Spark memory. Each is resumable
+from its own checkpoint and receives a full held-out cached-activation evaluation. The
+script verifies activation headers once, never recollects activations, and prints an
+8×/12×/16× comparison of FVE, cosine similarity, mean L0, active-feature fraction, and
+the configured 90% utilization gate. Checkpoints are saved every 5,000 steps to limit
+the two new runs to roughly 16 GB of checkpoint storage.
+
+Do not run live-model fidelity or develop labels for every sweep member. In the morning,
+select the narrowest model that clears the utilization gate without an unacceptable
+reconstruction drop, then run fidelity and checkpoint-bound labeling for that winner.
+The earlier 16× label registry cannot be transferred to a new checkpoint.
+
 ### Suggested run sizes
 
 | Run | Activation tokens | Expansion | Steps | Purpose |
